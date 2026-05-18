@@ -505,12 +505,14 @@ def agendar_inteligente(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
         for _, r in rec_pend.iterrows():
             if not pd.notna(r["__venc"]): continue
             d = r["__venc"].normalize()
-            if d < data_ini or d > data_fim: continue
+            if d > data_fim: continue
+            # Cobranças vencidas antes do período: projeta para o primeiro dia
+            d_efetivo = d if d >= data_ini else data_ini
             # Desconta inadimplência esperada
             fator = (1.0 - perc_inadimplencia)
             val_proj = float(r["__val"]) * fator
-            entradas_projetadas[d] = entradas_projetadas.get(d, 0.0) + val_proj
-            n_proj_dia[d] = n_proj_dia.get(d, 0) + 1
+            entradas_projetadas[d_efetivo] = entradas_projetadas.get(d_efetivo, 0.0) + val_proj
+            n_proj_dia[d_efetivo] = n_proj_dia.get(d_efetivo, 0) + 1
 
     # ── Combine: confirmadas têm prioridade ──
     entradas_totais = {}
@@ -732,8 +734,12 @@ def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
             (rec_df["__venc"] >= data_ini) &
             (rec_df["__venc"] <= data_fim)
         ]
-        for _, r in rec_periodo.iterrows():
+        for _, r in rec_df.iterrows():
+            if not pd.notna(r["__venc"]): continue
             d = r["__venc"].normalize()
+            # Só conta receivables FUTUROS no período (>= data_ini)
+            # Os vencidos já estão no saldo atual ou em rec_a_receber
+            if d < data_ini or d > data_fim: continue
             rec_por_dia[d] = rec_por_dia.get(d, 0.0) + r["__val"]
             n_rec_dia[d]   = n_rec_dia.get(d, 0)    + 1
 
@@ -1155,14 +1161,17 @@ else:
 
 st.markdown("---")
 
-# Análise da agenda do período
+# ── Projeção consistente: A Receber total vs A Pagar total ──────────────
+# Usa rec_a_receber (tudo que ainda não entrou) para comparar com total a pagar
+# O gap_real já foi calculado acima: rec_a_receber - total_a_pagar
+gap_periodo = rec_a_receber + caixa_ini - total_a_pagar
+
 st.markdown(f"#### 📅 Projeção dos Próximos {int(dias_hor)} Dias")
 an_p1, an_p2, an_p3 = st.columns(3)
-an_p1.metric("💸 Compromissos no período", brl(a["total_pagar"]),     f"{a['n_pend']} contas")
-an_p2.metric("📥 Entradas esperadas",      brl(a["total_rec_esp"]),   "Vencimentos do período")
-gap_periodo = a["total_rec_esp"] + caixa_ini - a["total_pagar"]
+an_p1.metric("💸 Compromissos (total)",     brl(total_a_pagar),        f"{len(pag_df)} contas")
+an_p2.metric("📥 A Receber (pendente)",    brl(rec_a_receber),        f"= Faturado {brl(rec_total)} − Recebido {brl(rec_pago)}")
 an_p3.metric(
-    "⚖️ GAP do Período",
+    "⚖️ GAP (A Receber + Caixa − A Pagar)",
     brl(abs(gap_periodo)),
     "DÉFICIT" if gap_periodo < 0 else "SUPERÁVIT",
     delta_color="inverse" if gap_periodo < 0 else "normal"
@@ -1245,7 +1254,7 @@ st.markdown(f"""
 
 **📅 PROJEÇÃO DOS PRÓXIMOS {int(dias_hor)} DIAS:**
 - Compromissos do período: **{brl(a['total_pagar'])}** ({a['n_pend']} contas)
-- Entradas esperadas no período: **{brl(a['total_rec_esp'])}**
+- A Receber (pendente): **{brl(rec_a_receber)}** = Faturado {brl(rec_total)} − Recebido {brl(rec_pago)}
 - GAP do período: **{brl(abs(gap_periodo))}** ({'DÉFICIT 🔴' if gap_periodo < 0 else 'SUPERÁVIT ✅'})
 
 **✅ RESULTADO DA AGENDA:**
