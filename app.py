@@ -610,40 +610,73 @@ elif "Extratos" in page:
                             if f.name.lower().endswith((".csv",".txt",".ofx")):
                                 f.seek(0)
                                 for enc in ["utf-8","latin-1","cp1252"]:
-                                    try: txt += f"\n---{f.name}---\n"+f.read().decode(enc)[:3500]; break
+                                    try:
+                                        txt += f"\n--- {f.name} ---\n" + f.read().decode(enc)[:2500]
+                                        break
                                     except: pass
                             elif f.name.lower().endswith((".xlsx",".xls")):
                                 f.seek(0)
                                 df_e = pd.read_excel(f)
-                                txt += f"\n---{f.name}---\n"+df_e.head(70).to_string()
+                                txt += f"\n--- {f.name} ---\n" + df_e.head(50).to_string()
                         except: pass
 
-                    ctx_f = ctx_financeiro()
-                    prompt = (
-                        f"{ctx_f}\n\n"
-                        f"Extrato: {banco} | {dti} a {dtf} | {emp} | {tipo}\n"
-                        f"Conteúdo:\n{txt[:4000] if txt else 'Arquivo PDF.'}\n\n"
-                        "Responda APENAS JSON sem markdown:\n"
+                    # Sanitiza contexto (remove aspas e quebras que quebram JSON)
+                    ctx_safe = ctx_financeiro().replace('"',"'").replace("\n"," | ")
+                    txt_safe = (txt[:2000] if txt else "Arquivo PDF.").replace('"',"'")
+
+                    schema = (
                         '{"resumo":{"entradas":"R$ X","saidas":"R$ X","saldo":"R$ X","transacoes":0},'
-                        '"insights":["..."],"alertas":[{"tipo":"danger|warn|success","texto":"..."}],'
-                        '"recomendacoes":["..."],'
-                        '"transacoes_destaque":[{"desc":"...","valor":"R$ X","tipo":"entrada|saida","data":"DD/MM"}],'
-                        '"parecer":"3 frases cruzando extrato com dados da carteira."}'
+                        '"parecer":"analise em uma frase",'
+                        '"insights":["insight 1","insight 2"],'
+                        '"alertas":[{"tipo":"warn","texto":"alerta curto"}],'
+                        '"recomendacoes":["acao 1","acao 2"],'
+                        '"transacoes_destaque":[{"desc":"descricao","valor":"R$ X","tipo":"entrada","data":"DD/MM"}]}'
                     )
-                    sys_e = ("Maxwell CFO IA da Jet Telecom. Analise o extrato cruzando com os dados reais da carteira. "
-                             "Responda APENAS JSON válido.")
+                    prompt = (
+                        f"CONTEXTO: {ctx_safe}\n\n"
+                        f"EXTRATO: {banco} | {dti} a {dtf} | {emp} | {tipo}\n"
+                        f"DADOS DO ARQUIVO:\n{txt_safe}\n\n"
+                        f"Responda SOMENTE o JSON abaixo preenchido, sem nenhum texto antes ou depois:\n{schema}"
+                    )
+                    sys_e = (
+                        "Voce e Maxwell CFO IA do Grupo Jet. "
+                        "Analise o extrato e responda APENAS um JSON valido e COMPLETO. "
+                        "NUNCA deixe strings abertas ou JSON incompleto. "
+                        "Todas as strings devem ter abertura e fechamento de aspas duplas. "
+                        "Se nao conseguir ler o extrato, estime os valores com base no contexto."
+                    )
+                    raw = ""
                     try:
                         r = get_client().messages.create(
-                            model="claude-sonnet-4-6", max_tokens=1000,
+                            model="claude-sonnet-4-6",
+                            max_tokens=1500,
                             system=sys_e,
                             messages=[{"role":"user","content":prompt}]
                         )
-                        raw = r.content[0].text
-                        j = json.loads(raw.replace("```json","").replace("```","").strip())
+                        raw = r.content[0].text.strip()
+                        # Limpeza robusta
+                        raw = raw.replace("```json","").replace("```","").strip()
+                        start = raw.find("{")
+                        end   = raw.rfind("}") + 1
+                        if start >= 0 and end > start:
+                            raw = raw[start:end]
+                        j = json.loads(raw)
                         st.session_state.ext_result = j
                         st.rerun()
+                    except json.JSONDecodeError as je:
+                        # Fallback com texto bruto
+                        st.session_state.ext_result = {
+                            "resumo": {"entradas":"—","saidas":"—","saldo":"—","transacoes":0},
+                            "parecer": "Analise parcial — veja os insights abaixo.",
+                            "insights": [raw[:400] if raw else "Sem resposta da API."],
+                            "alertas": [{"tipo":"warn","texto":f"JSON incompleto ({str(je)[:80]}). Tente CSV."}],
+                            "recomendacoes": ["Exporte o extrato como CSV pelo internet banking para melhor leitura."],
+                            "transacoes_destaque": []
+                        }
+                        st.rerun()
                     except Exception as e:
-                        st.error(f"Erro: {e}")
+                        st.error(f"Erro na API: {e}")
+
 
     with col_r:
         st.markdown("**🧠 Análise do CFO**")
