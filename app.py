@@ -160,6 +160,7 @@ for k, v in {
     "chat_history": [], "api_key": "",
     "data_src": "Sem dados importados",
     "last_update": None,
+    "hub_col_map": {}, "col_expanded": False,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -168,9 +169,12 @@ for k, v in {
 # UTILITÁRIOS
 # ══════════════════════════════════════════════════════════
 def brl(v):
+    """Formata valor no padrão brasileiro: R$ 1.234.567,89"""
     try:
         n = float(v)
-        s = f"{n:_.2f}".replace("_",".").replace(",","X").replace(".",",").replace("X",".")
+        # f"{n:,.2f}" → "1,234,567.89" (padrão US)
+        # Converte para BR: . milhar, , decimal
+        s = f"{n:,.2f}".replace(".", "X").replace(",", ".").replace("X", ",")
         return f"R$ {s}"
     except:
         return "R$ —"
@@ -241,15 +245,33 @@ def recalc():
         srcs.append(f"Hubsoft ({len(hub)} reg.)")
         hub = hub.copy()
 
-        # Detecta colunas por nome (aceita variações do Hubsoft)
-        sc   = dcol(hub,"status","situacao","estado","situation","situação")
-        nc   = dcol(hub,"mensalidade","valor","value","amount","mensal","monthly","valormensal","valorplano")
-        dc2  = dcol(hub,"diasatraso","dias","atraso","days","overdue","diasdeatraso")
-        vc   = dcol(hub,"valoraberto","aberto","debito","saldo","balance","valordevido","devido","valoratraso")
-        pc   = dcol(hub,"datapagamento","pagamento","pago","datapag","paid","payment","dtpagamento","datapag")
-        vpc  = dcol(hub,"valorpago","valorrecebido","recebido","amountpaid","paidamount")
-        venc = dcol(hub,"vencimento","datavencimento","vencto","duedate","datavenc","venc","dtavencimento")
-        vpc2 = dcol(hub,"valorafaturado","faturado","invoiced","valorcobranca","cobranca","valorliquido")
+        # ── Usa mapa manual se definido pelo usuário, senão detecta automaticamente ──
+        col_map = _st.session_state.get("hub_col_map", {})
+
+        def _col(manual_key, *auto_terms):
+            """Retorna coluna manual se definida, senão detecta automaticamente."""
+            manual = col_map.get(manual_key)
+            if manual and manual in hub.columns:
+                return manual
+            return dcol(hub, *auto_terms)
+
+        sc   = _col("status",  "status","situacao","estado","situation","situação")
+        nc   = _col("valor",   "mensalidade","valor","value","amount","mensal","monthly","valormensal","valorplano","plano")
+        dc2  = _col("dias",    "diasatraso","dias","atraso","days","overdue","diasdeatraso")
+        vc   = _col("atraso",  "valoraberto","aberto","debito","saldo","balance","valordevido","devido","valoratraso")
+        pc   = _col("pago",    "datapagamento","pagamento","pago","datapag","paid","payment","dtpagamento")
+        vpc  = dcol(hub,       "valorpago","valorrecebido","recebido","amountpaid","paidamount")
+        venc = _col("venc",    "vencimento","datavencimento","vencto","duedate","datavenc","venc","dtavencimento")
+        vpc2 = dcol(hub,       "valorafaturado","faturado","invoiced","valorcobranca","cobranca","valorliquido")
+
+        # ── Diagnóstico: evita somar coluna com valores absurdos ──
+        # Se nc detectado mas média/cliente > R$ 100.000, provavelmente coluna errada
+        if nc:
+            sample_vals = hub[nc].apply(pv).dropna()
+            avg_val = sample_vals.mean() if len(sample_vals) > 0 else 0
+            # Se média > 100k ou < 0.01, ignora coluna e usa None
+            if avg_val > 100000 or (avg_val < 0.01 and avg_val > 0):
+                nc = None  # força usuário a selecionar manualmente
 
         # ── Normaliza status ──
         if sc:
@@ -822,7 +844,7 @@ elif "Extratos" in page:
 
                     if ofx_data:
                         o = ofx_data
-                        brl_f = lambda v: f"R$ {v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                        brl_f = lambda v: f"R$ {float(v):,.2f}".replace(".", "X").replace(",", ".").replace("X", ",")
                         top_e_txt = " | ".join(f"{r['memo'][:40]} ({brl_f(r['valor'])})" for r in o["top_ent"][:5])
                         top_s_txt = " | ".join(f"{r['memo'][:40]} ({brl_f(r['valor'])})" for r in o["top_sai"][:5])
                         cats_txt  = " | ".join(f"{cat}: ent={brl_f(v['ent'])} sai={brl_f(v['sai'])} n={v['n']}"
@@ -902,7 +924,7 @@ elif "Extratos" in page:
                         # Fallback: monta resultado direto dos dados OFX sem depender de JSON da IA
                         if ofx_data:
                             o = ofx_data
-                            brl_f = lambda v: f"R$ {v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                            brl_f = lambda v: f"R$ {float(v):,.2f}".replace(".", "X").replace(",", ".").replace("X", ",")
                             st.session_state.ext_result = {
                                 "resumo": resumo_real,
                                 "parecer": f"Extrato {o['banco']} ({o['periodo']}): {o['n_trans']} transacoes. Entradas {brl_f(o['entradas'])}, saidas {brl_f(o['saidas'])}, saldo {brl_f(o['saldo'])}.",
@@ -977,14 +999,83 @@ elif "Importar" in page:
         st.markdown("#### 🏪 Planilha Hubsoft")
         st.caption("Exporte: Relatórios → Clientes / Faturamento / Inadimplência")
         if st.session_state.hub_df is not None:
-            st.success(f"✅ **{len(limpar(st.session_state.hub_df))}** registros carregados")
-            st.dataframe(limpar(st.session_state.hub_df).head(8), use_container_width=True, hide_index=True)
+            hub_raw = st.session_state.hub_df
+            n_rows  = len(limpar(hub_raw))
+            st.success(f"✅ **{n_rows}** registros carregados")
+
+            # ── Seletor de colunas ──
+            with st.expander("⚙️ Configurar colunas (clique se os valores estiverem errados)", expanded=st.session_state.get("col_expanded", False)):
+                st.caption("Selecione qual coluna da planilha representa cada informação financeira:")
+                cols_disp = ["(auto)"] + list(hub_raw.columns)
+
+                # Mostra amostra de valores para ajudar o usuário
+                st.markdown("**Prévia das primeiras linhas:**")
+                st.dataframe(hub_raw.head(3), use_container_width=True, hide_index=True)
+
+                g1, g2 = st.columns(2)
+                with g1:
+                    col_valor = st.selectbox("💰 Coluna de valor/mensalidade:",
+                        cols_disp, key="col_valor",
+                        index=0,
+                        help="Valor mensal cobrado por cliente")
+                    col_status = st.selectbox("📌 Coluna de status:",
+                        cols_disp, key="col_status",
+                        index=0,
+                        help="Status do cliente: ativo, inadimplente, etc")
+                    col_pago = st.selectbox("✅ Coluna de data/valor pago:",
+                        cols_disp, key="col_pago",
+                        index=0,
+                        help="Data de pagamento ou valor efetivamente pago")
+                with g2:
+                    col_atraso = st.selectbox("🔴 Coluna de valor em atraso:",
+                        cols_disp, key="col_atraso",
+                        index=0,
+                        help="Valor em aberto ou atrasado")
+                    col_dias = st.selectbox("⏱ Coluna de dias de atraso:",
+                        cols_disp, key="col_dias",
+                        index=0,
+                        help="Número de dias em atraso")
+                    col_venc = st.selectbox("📅 Coluna de vencimento:",
+                        cols_disp, key="col_venc",
+                        index=0,
+                        help="Data de vencimento da fatura")
+
+                # Salva mapeamento manual
+                col_map = {
+                    "valor":  col_valor  if col_valor  != "(auto)" else None,
+                    "status": col_status if col_status != "(auto)" else None,
+                    "pago":   col_pago   if col_pago   != "(auto)" else None,
+                    "atraso": col_atraso if col_atraso != "(auto)" else None,
+                    "dias":   col_dias   if col_dias   != "(auto)" else None,
+                    "venc":   col_venc   if col_venc   != "(auto)" else None,
+                }
+                st.session_state.hub_col_map = col_map
+
+                if st.button("🔄 Reaplicar com estas colunas", type="primary", use_container_width=True):
+                    st.session_state.col_expanded = True
+                    recalc()
+                    st.rerun()
+
+                # Mostra média por cliente para validação
+                s_prev = st.session_state.stats
+                if s_prev["fat_total"] > 0 and s_prev["n_clientes"] > 0:
+                    media = s_prev["fat_total"] / s_prev["n_clientes"]
+                    st.markdown(f"""
+                    <div style='background:#F6F4F1;border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px'>
+                        📊 <strong>Validação:</strong> Média por cliente = <strong>{brl(media)}</strong>
+                        {'✅ Parece correto' if 50 < media < 50000 else '⚠️ Valor suspeito — verifique a coluna selecionada'}
+                    </div>""", unsafe_allow_html=True)
+
             if st.button("🗑️ Remover Hubsoft"):
                 st.session_state.hub_df = None
+                st.session_state.hub_col_map = {}
                 st.session_state.inad_df = pd.DataFrame()
+                st.session_state.col_expanded = False
                 recalc()
                 st.rerun()
         else:
+            if "hub_col_map" not in st.session_state:
+                st.session_state.hub_col_map = {}
             fh = st.file_uploader("Hubsoft", type=["xlsx","xls","csv"],
                 label_visibility="collapsed", key="hu")
             if fh:
@@ -992,6 +1083,8 @@ elif "Importar" in page:
                     df = read_file(fh)
                 if df is not None and not df.empty:
                     st.session_state.hub_df = df
+                    st.session_state.hub_col_map = {}
+                    st.session_state.col_expanded = True  # abre config automaticamente
                     recalc()
                     st.success(f"✅ {fh.name} · {len(df)} linhas importadas!")
                     st.rerun()
