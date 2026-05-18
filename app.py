@@ -1188,7 +1188,7 @@ if _HAS_HUB:
     def _gs(k, d=""):
         try: return st.secrets.get(k, d)
         except: return d
-    _hub_url  = _gs("HUBSOFT_URL",  "https://jettelecom.hubsoft.com.br")
+    _hub_url  = _gs("HUBSOFT_URL",  "https://api.jettelecom.hubsoft.com.br")
     _hub_cid  = _gs("HUBSOFT_CLIENT_ID",  "")
     _hub_csec = _gs("HUBSOFT_CLIENT_SECRET", "")
     _hub_user = _gs("HUBSOFT_USERNAME", "")
@@ -2427,7 +2427,7 @@ with tab_hub:
             try: return st.secrets.get(k, d)
             except: return d
 
-        hub_url  = _gs("HUBSOFT_URL",           "https://jettelecom.hubsoft.com.br")
+        hub_url  = _gs("HUBSOFT_URL",           "https://api.jettelecom.hubsoft.com.br")
         hub_cid  = _gs("HUBSOFT_CLIENT_ID",     "147")
         hub_csec = _gs("HUBSOFT_CLIENT_SECRET", "")
         hub_user = _gs("HUBSOFT_USERNAME",      "")
@@ -2455,7 +2455,7 @@ with tab_hub:
             with st.expander("⚙️ Configurar credenciais", expanded=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    hub_url  = st.text_input("URL", value=hub_url, key="h_url")
+                    hub_url  = st.text_input("URL", value=hub_url or "https://api.jettelecom.hubsoft.com.br", key="h_url")
                     hub_cid  = st.text_input("Client ID", value=hub_cid, key="h_cid")
                     hub_csec = st.text_input("Client Secret", value="", type="password", key="h_csec")
                 with c2:
