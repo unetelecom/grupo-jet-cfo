@@ -216,10 +216,12 @@ def read_file(f):
 # PROCESSAMENTO CENTRAL — chamado ao importar qualquer dado
 # ══════════════════════════════════════════════════════════
 def recalc():
-    hub  = st.session_state.hub_df
-    pag  = st.session_state.pag_df
+    # Alias para evitar conflito entre streamlit (st) e dict de stats (S)
+    import streamlit as _st
+    hub  = _st.session_state.hub_df
+    pag  = _st.session_state.pag_df
     hoje = pd.Timestamp.now().normalize()
-    st  = STAT_ZERO.copy()
+    S    = STAT_ZERO.copy()
     srcs = []
 
     # ── HUBSOFT ──
@@ -244,23 +246,23 @@ def recalc():
         is_canc = hub["_st"].str.contains("cancel", na=False)
         is_ativ = ~(is_inad | is_susp | is_canc)
 
-        st["n_clientes"]   = len(hub)
-        st["n_ativos"]     = int(is_ativ.sum())
-        st["n_inad"]       = int(is_inad.sum())
-        st["n_suspensos"]  = int(is_susp.sum())
-        st["n_cancelados"] = int(is_canc.sum())
+        S["n_clientes"]   = len(hub)
+        S["n_ativos"]     = int(is_ativ.sum())
+        S["n_inad"]       = int(is_inad.sum())
+        S["n_suspensos"]  = int(is_susp.sum())
+        S["n_cancelados"] = int(is_canc.sum())
 
         if nc:
             hub["_mens"] = hub[nc].apply(pv)
-            st["fat_total"] = float(hub["_mens"].sum())
-            st["fat_inad"]  = float(hub.loc[is_inad,"_mens"].sum())
-            st["fat_rec"]   = float(hub.loc[is_ativ,"_mens"].sum() * 0.87)
+            S["fat_total"] = float(hub["_mens"].sum())
+            S["fat_inad"]  = float(hub.loc[is_inad,"_mens"].sum())
+            S["fat_rec"]   = float(hub.loc[is_ativ,"_mens"].sum() * 0.87)
         else:
             hub["_mens"] = 0.0
 
-        if st["fat_total"] > 0:
-            st["inad_pct"] = round(st["fat_inad"] / st["fat_total"] * 100, 1)
-            st["rec_pct"]  = round(st["fat_rec"]  / st["fat_total"] * 100, 1)
+        if S["fat_total"] > 0:
+            S["inad_pct"] = round(S["fat_inad"] / S["fat_total"] * 100, 1)
+            S["rec_pct"]  = round(S["fat_rec"]  / S["fat_total"] * 100, 1)
 
         # DF inadimplentes
         inad = hub[is_inad].copy()
@@ -316,12 +318,12 @@ def recalc():
             pag["_dias_v"] = 999
 
         pag_ativ = pag[pag["_st_pag"] != "pago"]
-        st["pag_total"]    = float(pag_ativ["_val"].sum())
-        st["pag_vencidas"] = float(pag[pag["_st_pag"]=="vencida"]["_val"].sum())
-        st["pag_avencer"]  = float(pag[pag["_st_pag"].isin(["a vencer","vence hoje"])]["_val"].sum())
-        st["n_pag"]        = len(pag_ativ)
-        st["n_pag_venc"]   = int((pag["_st_pag"]=="vencida").sum())
-        st["n_pag_avenc"]  = int(pag["_st_pag"].isin(["a vencer","vence hoje"]).sum())
+        S["pag_total"]    = float(pag_ativ["_val"].sum())
+        S["pag_vencidas"] = float(pag[pag["_st_pag"]=="vencida"]["_val"].sum())
+        S["pag_avencer"]  = float(pag[pag["_st_pag"].isin(["a vencer","vence hoje"])]["_val"].sum())
+        S["n_pag"]        = len(pag_ativ)
+        S["n_pag_venc"]   = int((pag["_st_pag"]=="vencida").sum())
+        S["n_pag_avenc"]  = int(pag["_st_pag"].isin(["a vencer","vence hoje"]).sum())
 
         ordem = {"vencida":0,"vence hoje":1,"a vencer":2,"em dia":3,"—":4,"pago":5}
         pag["_ord"] = pag["_st_pag"].map(ordem).fillna(9)
@@ -336,7 +338,7 @@ def recalc():
 
     # Atualiza session_state
     import streamlit as _st
-    _st.session_state.stats      = st_module
+    _st.session_state.stats      = S
     _st.session_state.hub_df     = st_session_hub
     _st.session_state.inad_df    = st_session_inad
     _st.session_state.pag_df     = st_session_pag
