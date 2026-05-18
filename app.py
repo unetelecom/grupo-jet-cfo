@@ -386,7 +386,10 @@ def parse_receber(uploaded) -> pd.DataFrame:
     df["__st"]   = df[col_st].fillna("").astype(str).str.lower().str.strip() if col_st else "faturado"
     df["__pago"] = df["__st"].isin(STATUS_PAGO)
 
-    return df[(df["__val"] > 0) & (~df["__pago"]) & df["__venc"].notna()].copy()
+    result = df[(df["__val"] > 0) & df["__venc"].notna()].copy()
+    # __nome_c = nome limpo para agrupamento por cliente
+    result["__nome_c"] = result["__nome"]
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -466,6 +469,117 @@ def parse_recebidos(uploaded) -> pd.DataFrame:
     df["__memo"]    = df["__pagante"]
 
     return df[df["__val"] > 0].copy()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CRUZAMENTO CLIENTE A CLIENTE: Faturamento × OFX
+# ══════════════════════════════════════════════════════════════════════
+def cruzar_clientes(rec_df: pd.DataFrame, rec_df_recebidos: pd.DataFrame) -> dict:
+    """
+    Cruza faturamento (Hubsoft) com pagamentos recebidos (OFX/extrato).
+    Para cada cobrança classifica: recebido / atrasado / a_vencer.
+    Agrupa por cliente.
+    """
+    import unicodedata as _uc, re as _re2
+
+    if rec_df.empty or "__val" not in rec_df.columns:
+        return {"cli": pd.DataFrame(), "rec_aug": pd.DataFrame(),
+                "ofx_casado": 0.0, "ofx_nc": 0.0, "n_matches": 0}
+
+    today = pd.Timestamp.now().normalize()
+    rec = rec_df.copy().reset_index(drop=True)
+
+    def _norm(s):
+        s = _uc.normalize("NFKD", str(s).upper())
+        s = "".join(c for c in s if not _uc.combining(c))
+        for t in ["LTDA","S.A","S/A","ME","EIRELI","SA","SS","EPP","DE","DA","DO","DOS","DAS","E"]:
+            s = _re2.sub(rf"\b{t}\b", "", s)
+        return _re2.sub(r"\s+", " ", s).strip()
+    def _pw(s): return {w for w in _norm(s).split() if len(w) > 3}
+
+    # ── Sem OFX: classifica só por data de vencimento ────────────────
+    if rec_df_recebidos.empty:
+        rec["_cat"]     = "a_vencer"
+        rec.loc[rec["__venc"] < today, "_cat"] = "atrasado"
+        rec["_val_rec"] = 0.0
+        cli = _agrupa_clientes(rec, today)
+        return {"cli": cli, "rec_aug": rec, "ofx_casado": 0.0,
+                "ofx_nc": 0.0, "n_matches": 0}
+
+    # ── Com OFX: concilia cobrança a cobrança ────────────────────────
+    ofx = rec_df_recebidos.copy().reset_index(drop=True)
+    hub_vc = rec["__val"].round(2).value_counts().to_dict()
+
+    cands = []
+    for io, o in ofx.iterrows():
+        vo = float(o["__val"]); memo = str(o.get("__memo",""))
+        do = pd.Timestamp(o["__data"]) if pd.notna(o.get("__data")) else today
+        mu = memo.upper()
+        if mu.startswith("PIX RECEBIDO DE"):   tipo="PIX";    pag=mu.replace("PIX RECEBIDO DE","").split("|")[0].strip()
+        elif mu.startswith("TED RECEBIDA DE"): tipo="TED";    pag=mu.replace("TED RECEBIDA DE","").split("|")[0].strip()
+        elif mu.startswith("BOLETO PAGO POR"): tipo="BOLETO"; pag=mu.replace("BOLETO PAGO POR","").strip()
+        else:                                  tipo="OUTRO";  pag=memo
+        pag_pw = _pw(pag)
+        for ih, h in rec.iterrows():
+            vh = float(h["__val"])
+            if abs(vo - vh) / max(vh, 0.01) > 0.012: continue
+            dd = 999
+            if pd.notna(h["__venc"]):
+                try: dd = abs(int((do - pd.Timestamp(h["__venc"])).total_seconds() / 86400))
+                except: pass
+            if dd > 30: continue
+            n_same = hub_vc.get(round(vh, 2), 1)
+            unico = (n_same == 1); raro = (n_same <= 2)
+            cli_pw = _pw(str(h.get("__nome", h.iloc[0]))); nm = len(cli_pw & pag_pw)
+            if tipo in ("PIX","TED") and nm == 0 and not unico: continue
+            if tipo == "BOLETO" and not unico and nm == 0 and dd > 5: continue
+            sc  = (50 if abs(vo-vh)/max(vh,0.01) < 0.001 else 30)
+            sc += (30 if dd<=2 else 20 if dd<=5 else 10 if dd<=10 else 4)
+            sc += min(nm*20, 40); sc += (15 if unico else 5 if raro else 0)
+            cands.append({"io":io,"ih":ih,"sc":sc,"val_hub":vh,"val_ofx":vo,
+                          "data":do,"venc":h["__venc"],"tipo":tipo,"pag":pag[:50],
+                          "nome":str(h.get("__nome",h.iloc[0]))})
+
+    cdf = pd.DataFrame(cands).sort_values("sc", ascending=False) if cands else pd.DataFrame()
+    uo = set(); uh = set(); ml = []
+    if not cdf.empty:
+        for _, c in cdf.iterrows():
+            if c["io"] not in uo and c["ih"] not in uh:
+                uo.add(c["io"]); uh.add(c["ih"]); ml.append(c)
+    mdf    = pd.DataFrame(ml) if ml else pd.DataFrame()
+    mid    = set(mdf["ih"].tolist()) if not mdf.empty else set()
+    ofx_c  = float(mdf["val_hub"].sum()) if not mdf.empty else 0.0
+    ofx_nc = float(ofx[~ofx.index.isin(uo)]["__val"].sum()) if not ofx.empty else 0.0
+
+    rec["_cat"]     = "a_vencer"
+    rec.loc[rec.index.isin(mid), "_cat"] = "recebido"
+    rec.loc[(~rec.index.isin(mid)) & (rec["__venc"] < today), "_cat"] = "atrasado"
+    rec["_val_rec"] = rec.apply(lambda r: r["__val"] if r.name in mid else 0.0, axis=1)
+
+    # Nome do cliente
+    nome_col = "__nome" if "__nome" in rec.columns else rec.columns[1]
+    rec["__nome_c"] = rec[nome_col].fillna("").astype(str).str.strip()
+
+    cli = _agrupa_clientes(rec, today)
+    return {"cli": cli, "rec_aug": rec, "mdf": mdf,
+            "ofx_casado": ofx_c, "ofx_nc": ofx_nc, "n_matches": len(mdf)}
+
+
+def _agrupa_clientes(rec: pd.DataFrame, today) -> pd.DataFrame:
+    nome_col = "__nome_c" if "__nome_c" in rec.columns else (
+               "__nome" if "__nome" in rec.columns else rec.columns[1])
+    g = rec.groupby(nome_col)
+    cli = g.agg(
+        faturado = ("__val",   "sum"),
+        recebido = ("_val_rec","sum"),
+        atrasado = ("__val",   lambda x: x[rec.loc[x.index,"_cat"]=="atrasado"].sum()),
+        a_vencer = ("__val",   lambda x: x[rec.loc[x.index,"_cat"]=="a_vencer"].sum()),
+        n_cob    = ("__val",   "count"),
+        n_rec    = ("_cat",    lambda x: (x=="recebido").sum()),
+        n_atr    = ("_cat",    lambda x: (x=="atrasado").sum()),
+        n_av     = ("_cat",    lambda x: (x=="a_vencer").sum()),
+    ).reset_index().rename(columns={nome_col:"cliente"})
+    return cli.sort_values("faturado", ascending=False)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1300,6 +1414,10 @@ st.markdown("---")
 _n_rec = len(rec_df_recebidos) if not rec_df_recebidos.empty else 0
 _v_rec = rec_df_recebidos["__val"].sum() if not rec_df_recebidos.empty else 0.0
 
+# Calcula cruzamento cliente a cliente
+with st.spinner("📊 Cruzando faturamento × recebimentos..."):
+    crz = cruzar_clientes(rec_df, rec_df_recebidos)
+
 # Calcula inteligência financeira
 with st.spinner("🧠 Calculando agendamento inteligente..."):
     intel = agendar_inteligente(
@@ -1309,9 +1427,10 @@ with st.spinner("🧠 Calculando agendamento inteligente..."):
         usar_recebidos=True,
     )
 
-tab_intel, tab_agenda, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
+tab_intel, tab_agenda, tab_crz, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
     "🧠 Inteligência Financeira",
     "📅 Agenda Detalhada",
+    "📊 Cruzamento Clientes",
     f"✅ Já Recebidos ({_n_rec}) — {brl(_v_rec)}",
     "📂 Por Categoria",
     f"📋 Lista Completa ({a['n_pend']})",
@@ -1721,6 +1840,160 @@ with tab_agenda:
             )
         elif not dia["fim_semana"]:
             st.caption("— sem pagamentos programados neste dia —")
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB CRUZAMENTO CLIENTES
+# ══════════════════════════════════════════════════════════════════════
+with tab_crz:
+    st.markdown("### 📊 Cruzamento Cliente a Cliente")
+    st.markdown(
+        "Cada cobrança do Hubsoft cruzada com o extrato bancário. "
+        "Mostra exatamente o que cada cliente pagou, o que está atrasado e o que ainda vai vencer."
+    )
+
+    cli_df   = crz.get("cli", pd.DataFrame())
+    rec_aug  = crz.get("rec_aug", pd.DataFrame())
+    ofx_cas  = crz.get("ofx_casado", 0.0)
+    ofx_nc   = crz.get("ofx_nc", 0.0)
+    n_match  = crz.get("n_matches", 0)
+
+    if cli_df.empty:
+        st.info("📥 Importe o **Faturamento** e os **Já Recebidos** (OFX ou planilha) para ver o cruzamento.")
+    else:
+        t_fat = float(cli_df["faturado"].sum())
+        t_rec = float(cli_df["recebido"].sum())
+        t_atr = float(cli_df["atrasado"].sum())
+        t_av  = float(cli_df["a_vencer"].sum())
+        n_cli = len(cli_df)
+        n_ina = int((cli_df["n_atr"] > 0).sum())
+
+        # ── KPIs ──
+        ck1,ck2,ck3,ck4,ck5 = st.columns(5)
+        ck1.metric("📋 Faturado",     brl(t_fat), f"{n_cli} clientes")
+        ck2.metric("✅ Recebido",     brl(t_rec), f"{n_match} cobranças casadas")
+        ck3.metric("🔴 Atrasado",     brl(t_atr), f"{n_ina} clientes inadimplentes",
+                   delta_color="inverse")
+        ck4.metric("🔵 A Vencer",     brl(t_av))
+        ck5.metric("🔗 OFX não casado", brl(ofx_nc),
+                   "cobranças de outros meses", delta_color="off")
+
+        # Validação interna
+        check = abs(t_rec + t_atr + t_av - t_fat)
+        if check < 1:
+            st.success(f"✅ Rec ({brl(t_rec)}) + Atrasado ({brl(t_atr)}) + A Vencer ({brl(t_av)}) = Faturado ({brl(t_fat)})")
+        else:
+            st.warning(f"⚠️ Diferença de {brl(check)} — verificar dados")
+
+        # Nota explicativa sobre OFX não casado
+        if ofx_nc > 0:
+            st.info(
+                f"ℹ️ O extrato tem **{brl(ofx_nc)} não casados** com cobranças de maio. "
+                f"Esses são pagamentos de **meses anteriores** recebidos este mês — "
+                f"contam no saldo bancário mas não em cobranças de maio."
+            )
+
+        st.markdown("---")
+
+        # ── Gráfico barras por cliente (top 15) ──
+        st.markdown("#### 📊 Top 15 Clientes por Faturamento")
+        top15 = cli_df.head(15)
+        fig_crz = go.Figure()
+        fig_crz.add_trace(go.Bar(name="✅ Recebido", x=top15["cliente"].str[:30],
+            y=top15["recebido"], marker_color="#22A85A"))
+        fig_crz.add_trace(go.Bar(name="🔴 Atrasado", x=top15["cliente"].str[:30],
+            y=top15["atrasado"], marker_color="#D93025"))
+        fig_crz.add_trace(go.Bar(name="🔵 A Vencer", x=top15["cliente"].str[:30],
+            y=top15["a_vencer"], marker_color="#1976D2"))
+        fig_crz.update_layout(
+            barmode="stack", height=380,
+            plot_bgcolor="#111", paper_bgcolor="#111", font_color="#CCC",
+            xaxis=dict(gridcolor="#222", tickangle=-35, tickfont=dict(size=10)),
+            yaxis=dict(gridcolor="#222", tickprefix="R$ "),
+            legend=dict(bgcolor="#1A1A1A", x=0, y=1.12, orientation="h"),
+            margin=dict(t=30,b=100,l=80,r=20),
+        )
+        st.plotly_chart(fig_crz, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Filtros ──
+        cf1,cf2,cf3 = st.columns([3,2,2])
+        with cf1: busca_crz = st.text_input("🔍 Buscar cliente:", key="busca_crz")
+        with cf2:
+            filtro_sit = st.selectbox("Situação:", 
+                ["Todos","Com Atrasado","Sem Pagamento","Totalmente Pago"], key="sit_crz")
+        with cf3:
+            ord_crz = st.selectbox("Ordenar:", 
+                ["Faturado ↓","Atrasado ↓","A Vencer ↓","Recebido ↓"], key="ord_crz")
+
+        df_show = cli_df.copy()
+        if busca_crz:
+            df_show = df_show[df_show["cliente"].str.lower().str.contains(busca_crz.lower(), na=False)]
+        if filtro_sit == "Com Atrasado":      df_show = df_show[df_show["atrasado"] > 0]
+        elif filtro_sit == "Sem Pagamento":   df_show = df_show[df_show["recebido"] == 0]
+        elif filtro_sit == "Totalmente Pago": df_show = df_show[df_show["a_vencer"] == 0]
+        if ord_crz == "Faturado ↓":   df_show = df_show.sort_values("faturado", ascending=False)
+        elif ord_crz == "Atrasado ↓": df_show = df_show.sort_values("atrasado", ascending=False)
+        elif ord_crz == "A Vencer ↓": df_show = df_show.sort_values("a_vencer", ascending=False)
+        elif ord_crz == "Recebido ↓": df_show = df_show.sort_values("recebido", ascending=False)
+
+        st.markdown(f"**{len(df_show)} clientes** · Total: {brl(df_show['faturado'].sum())}")
+
+        # Tabela formatada
+        def pct(rec, fat): return f"{round(rec/fat*100,1)}%" if fat>0 else "0%"
+        def sit(row):
+            if row["atrasado"] > 0 and row["recebido"] == 0: return "🔴 Inadimplente"
+            if row["atrasado"] > 0: return "🟠 Parcial"
+            if row["recebido"] > 0 and row["a_vencer"] == 0: return "✅ Pago"
+            if row["recebido"] > 0: return "🟡 Parcial+OK"
+            return "🔵 A Vencer"
+
+        tab_rows = pd.DataFrame({
+            "Cliente":     df_show["cliente"].str[:45],
+            "Situação":    df_show.apply(sit, axis=1),
+            "Faturado":    df_show["faturado"].apply(brl),
+            "Recebido":    df_show["recebido"].apply(brl),
+            "% Rec":       df_show.apply(lambda r: pct(r["recebido"],r["faturado"]), axis=1),
+            "Atrasado":    df_show["atrasado"].apply(brl),
+            "A Vencer":    df_show["a_vencer"].apply(brl),
+            "Cobranças":   df_show["n_cob"].astype(int),
+        })
+        st.dataframe(tab_rows, use_container_width=True, hide_index=True,
+                     height=min(38*len(df_show)+42, 540))
+
+        st.markdown("---")
+
+        # ── Seção Inadimplentes ──
+        inad = cli_df[cli_df["atrasado"] > 0].sort_values("atrasado", ascending=False)
+        if not inad.empty:
+            st.markdown(f"#### 🚨 Inadimplentes — {len(inad)} clientes · {brl(inad['atrasado'].sum())}")
+            inad_tab = pd.DataFrame({
+                "#":           range(1, len(inad)+1),
+                "Cliente":     inad["cliente"].str[:45],
+                "Faturado":    inad["faturado"].apply(brl),
+                "Atrasado":    inad["atrasado"].apply(brl),
+                "Recebido":    inad["recebido"].apply(brl),
+                "A Vencer":    inad["a_vencer"].apply(brl),
+                "% Atraso":    inad.apply(lambda r: pct(r["atrasado"],r["faturado"]), axis=1),
+            })
+            st.dataframe(inad_tab, use_container_width=True, hide_index=True,
+                        height=min(38*len(inad)+42, 420))
+
+        # ── Seção A Vencer (maiores) ──
+        st.markdown("---")
+        av_tab = cli_df[cli_df["a_vencer"] > 0].sort_values("a_vencer", ascending=False).head(20)
+        st.markdown(f"#### 🔵 Top 20 A Vencer — {brl(cli_df['a_vencer'].sum())}")
+        av_rows = pd.DataFrame({
+            "#":         range(1, len(av_tab)+1),
+            "Cliente":   av_tab["cliente"].str[:45],
+            "A Vencer":  av_tab["a_vencer"].apply(brl),
+            "Faturado":  av_tab["faturado"].apply(brl),
+            "Recebido":  av_tab["recebido"].apply(brl),
+            "Cobranças": av_tab["n_av"].astype(int),
+        })
+        st.dataframe(av_rows, use_container_width=True, hide_index=True,
+                     height=min(38*len(av_rows)+42, 420))
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — POR CATEGORIA
