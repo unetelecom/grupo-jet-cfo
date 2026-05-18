@@ -349,8 +349,25 @@ class HubsoftAPI:
         for vc in ["valor","valor_pago"]:
             if vc in df.columns:
                 df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
-        PAGO = {"pago","baixado_banco","baixado_pix","baixado_manual",
-                "baixado_parcial","quitado","recebido","baixado_faturamento"}
+        PAGO = {
+            # Hubsoft variações de status pago
+            "pago","pago_total","pago_parcial","pago completo",
+            "baixado_banco","baixado_pix","baixado_manual",
+            "baixado_parcial","baixado_faturamento","baixado cheque",
+            "quitado","quitado_parcial","recebido","recebido_parcial",
+            "liquidado","liquidado_parcial","liquidado parcial",
+            "sim","yes","1","true",
+            # Status numéricos
+            "2","3","4","5",
+        }
+        # Loga status únicos para diagnóstico (primeiras 3 ocorrências)
+        if "status_raw" in df.columns:
+            status_unicos = df["status_raw"].fillna("").astype(str).str.lower().unique()
+            print(f"  Status Hubsoft encontrados: {list(status_unicos)[:15]}")
+            for s in status_unicos:
+                if s not in PAGO and s not in ("","nan","aberto","pendente","a_vencer","vencido"):
+                    print(f"  ⚠️  Status desconhecido: '{s}' — considere adicionar ao set PAGO")
+
         def _st(row):
             s = str(row.get("status_raw","")).lower().strip()
             if s in PAGO: return "PAGO"
@@ -358,6 +375,8 @@ class HubsoftAPI:
             if pd.notna(d) and pd.Timestamp(d) < today: return "ATRASADO"
             return "A_VENCER"
         df["status"]         = df.apply(_st, axis=1)
+        pago_count = (df["status"] == "PAGO").sum()
+        print(f"  Classificados: PAGO={pago_count}, ATRASADO={(df['status']=='ATRASADO').sum()}, A_VENCER={(df['status']=='A_VENCER').sum()}")
         df["dias_atraso"]    = df["data_vencimento"].apply(
             lambda d: max(0,(today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
         df["valor_pendente"] = df.apply(
@@ -405,6 +424,14 @@ class HubsoftAPI:
         # 4. rec_recebidos = faturas classificadas como PAGO
         if not cob_mes.empty and "status" in cob_mes.columns:
             cob_rec = cob_mes[cob_mes["status"] == "PAGO"].copy()
+            # Se nenhuma foi classificada como PAGO mas temos faturas,
+            # as faturas do call sem status-filter são implicitamente pagas
+            if cob_rec.empty and not cob_pagas.empty:
+                print("  ⚠️  Nenhuma PAGO classificada — tratando cob_pagas como pagas")
+                cob_rec = cob_pagas.copy()
+                cob_rec["status"] = "PAGO"
+                cob_rec["__pago"] = True
+                # Atualiza também no rec_df
         else:
             cob_rec = pd.DataFrame()
 
@@ -422,7 +449,18 @@ class HubsoftAPI:
             rec_df["__val"]    = pd.to_numeric(rec_df.get("valor",0), errors="coerce").fillna(0)
             rec_df["__venc"]   = rec_df.get("data_vencimento")
             rec_df["__nome"]   = rec_df.get("nome_razaosocial","").fillna("").astype(str)
-            rec_df["__pago"]   = rec_df["status"] == "PAGO"
+            # Se nenhuma foi classificada como PAGO, usa cob_pagas como referência
+            # (o call sem filtro de status retorna as pagas por padrão no Hubsoft)
+            status_pago_mask = rec_df.get("status", pd.Series()) == "PAGO"
+            if status_pago_mask.sum() == 0 and not cob_pagas.empty:
+                id_col_chk = "id_cobranca"
+                if id_col_chk in rec_df.columns and id_col_chk in cob_pagas.columns:
+                    ids_pagas_set = set(cob_pagas[id_col_chk].astype(str))
+                    status_pago_mask = rec_df[id_col_chk].astype(str).isin(ids_pagas_set)
+                else:
+                    # Sem id disponível: marca tudo do cob_pagas como pago por índice
+                    status_pago_mask = rec_df.index < len(cob_pagas)
+            rec_df["__pago"]   = status_pago_mask
             rec_df["__nome_c"] = rec_df["__nome"]
 
         rec_recebidos = pd.DataFrame()
