@@ -255,20 +255,28 @@ def fmtd(v):
     except: return str(v)
 
 def dcol(df, *terms):
-    """Detecta coluna por nome. Prioridade: exato > term-em-col > col-em-term(mín 60%)."""
+    """Detecta coluna por nome. Remove acentos, símbolos e maiúsculas para comparar."""
     if df is None or df.empty: return None
-    n = lambda s: str(s).lower().replace(" ","").replace("_","").replace("-","").replace("/","")
-    cols = [(c, n(c)) for c in df.columns]
+    import unicodedata
+    def norm(s):
+        s = str(s).lower()
+        # Remove acentos: ã→a, é→e, í→i, ó→o, ú→u, ç→c etc.
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        # Remove separadores
+        for ch in (" ", "_", "-", "/", ".", "`", "'", '"'):
+            s = s.replace(ch, "")
+        return s
+    cols = [(c, norm(c)) for c in df.columns]
     for t in terms:
-        nt = n(t)
+        nt = norm(t)
         # 1. Match exato
         for col, nc in cols:
             if nc == nt: return col
-        # 2. Termo é substring do nome da coluna (ex: "valor" em "valorpago")
+        # 2. Termo é substring do nome da coluna
         for col, nc in cols:
             if nt in nc: return col
-        # 3. Nome da coluna é substring do termo — só se col ≥ 60% do termo
-        #    (evita "valor" falso-positivo para busca de "valor_pago")
+        # 3. Nome da coluna é substring do termo — só se col ≥ 65% do termo
         for col, nc in cols:
             if nc in nt and len(nc) >= max(4, int(len(nt) * 0.65)): return col
     return None
@@ -474,11 +482,13 @@ def recalc():
         st_session_hub  = hub
 
     # ── CONTAS A PAGAR — leitura inteligente Hubsoft ──
+    st_session_pag = pag  # garante que sempre existe, mesmo se falhar
     if pag is not None and not pag.empty:
+      try:
         pag = pag.copy()
 
         # ═══════════════════════════════════════════════════
-        # PASSO 1 — Detecta colunas (Hubsoft exporta com nomes específicos)
+        # PASSO 1 — Detecta colunas
         # ═══════════════════════════════════════════════════
         col_forn    = dcol(pag,"razao_social","razaosocial","fornecedor","nome","supplier","name","beneficiario")
         col_venc    = dcol(pag,"vencimento","data_vencimento","datavencimento","vencto","duedate","datavenc")
@@ -489,112 +499,77 @@ def recalc():
         col_a_pagar = dcol(pag,"a_pagar","apagar","saldo","pendente","outstanding","aberto","due")
 
         # Evita conflito entre colunas de valor
-        if col_val_liq and col_val_liq == col_val:       col_val_liq = None
-        if col_val_pago and col_val_pago == col_val:     col_val_pago= None
-        if col_a_pagar and col_a_pagar in (col_val, col_val_liq): col_a_pagar = None
+        if col_val_liq  and col_val_liq  == col_val: col_val_liq  = None
+        if col_val_pago and col_val_pago == col_val: col_val_pago = None
+        if col_a_pagar  and col_a_pagar  in (col_val, col_val_liq): col_a_pagar = None
 
         # ═══════════════════════════════════════════════════
-        # PASSO 2 — Remove linhas de total/resumo e linhas "—"
-        # O Hubsoft adiciona linhas de subtotal sem Razão Social e sem Categoria
-        # Regra: excluir toda linha onde Razão Social OU Categoria esteja vazia/"—"
+        # PASSO 2 — Remove linhas de total/resumo
+        # Regra simples: requer Razão Social válida (>= 2 chars)
+        # Linhas sem nome com valor razoável (ex: CAJU) → incluídas como "Especial"
         # ═══════════════════════════════════════════════════
         VAZIOS = {"", "—", "-", "nan", "none", "null", "n/a"}
 
-        # ─── Separa linhas especiais (ex: CAJU) das linhas de total ───
-        # Lógica:
-        #  1. Linhas com Razão Social válida → contas normais
-        #  2. Linhas sem nome/cat MAS com A Pagar em valor razoável
-        #     e rótulo em algum campo (CAJU, CAIXA, etc) → linhas especiais
-        #  3. Linhas sem nome/cat com valor absurdo → subtotais → EXCLUIR
+        # Converte A Pagar antecipadamente para filtrar
+        col_ap_tmp = col_a_pagar or col_val_liq or col_val
+        if col_ap_tmp:
+            pag["__ap_tmp"] = pag[col_ap_tmp].apply(pv)
+        else:
+            pag["__ap_tmp"] = 0.0
 
-        # Calcula o maior A Pagar esperado (para detectar linhas de total)
-        todos_a_pagar = pag[col_a_pagar].apply(pv) if col_a_pagar else pd.Series([0])
-        max_razoavel  = todos_a_pagar[todos_a_pagar < 500000].sum() * 1.1  # 110% do total razoável
+        # Linhas normais: Razão Social válida
+        if col_forn:
+            nomes_s = pag[col_forn].fillna("").astype(str).str.strip()
+            mask_normal = (~nomes_s.str.lower().isin(VAZIOS)) & (nomes_s.str.len() >= 2)
+        else:
+            mask_normal = pd.Series([True] * len(pag), index=pag.index)
 
-        def eh_linha_especial(row):
-            """Linha sem nome/cat mas com valor razoável — ex: CAJU"""
-            nome_v = str(row.get(col_forn, "")).strip() if col_forn else ""
-            cat_v  = str(row.get(col_cat,  "")).strip() if col_cat  else ""
-            if nome_v.lower() not in VAZIOS and len(nome_v) >= 2: return False  # linha normal
-            if cat_v.lower()  not in VAZIOS and len(cat_v)  >= 2: return False  # linha normal
+        # Linhas especiais: sem nome mas valor razoável (0 < val < 500k)
+        # ex: CAJU, Caixa, etc.
+        if col_forn:
+            mask_sem_nome  = ~mask_normal
+            mask_razoavel  = (pag["__ap_tmp"] > 0) & (pag["__ap_tmp"] < 500000)
+            mask_especial  = mask_sem_nome & mask_razoavel
+        else:
+            mask_especial = pd.Series([False] * len(pag), index=pag.index)
 
-            # Sem nome E sem categoria — verifica se tem valor razoável
-            apagar_v = pv(row.get(col_a_pagar, 0)) if col_a_pagar else 0
-            if apagar_v <= 0 or apagar_v > 500000: return False  # total ou nulo
+        pag_normal   = pag[mask_normal].copy()
+        pag_especial = pag[mask_especial].copy()
 
-            # Procura rótulo em qualquer campo (ex: "CAJU" no col_val_pago)
-            for col in pag.columns:
-                v = str(row.get(col, "")).strip()
-                if v and v.lower() not in VAZIOS and not _is_number(v):
-                    return True  # tem rótulo de texto → linha especial
-            return True  # tem valor mas sem rótulo → inclui mesmo assim
-
-        def _is_number(s):
-            try: float(s.replace(",",".")); return True
-            except: return False
-
-        def get_rotulo(row):
-            """Extrai rótulo da linha especial (ex: 'CAJU')"""
-            for col in pag.columns:
-                v = str(row.get(col, "")).strip()
-                if v and v.lower() not in VAZIOS and not _is_number(v):
-                    return v.upper()
-            return "ESPECIAL"
-
-        # Separa os grupos
-        linhas_normais   = []
-        linhas_especiais = []
-
-        for idx, row in pag.iterrows():
-            nome_v = str(row.get(col_forn, "")).strip() if col_forn else ""
-            cat_v  = str(row.get(col_cat, "")).strip()  if col_cat  else ""
-
-            nome_ok = nome_v.lower() not in VAZIOS and len(nome_v) >= 2
-            cat_ok  = cat_v.lower()  not in VAZIOS and len(cat_v)  >= 2
-
-            if nome_ok and cat_ok:
-                linhas_normais.append(idx)
-            elif eh_linha_especial(row):
-                linhas_especiais.append(idx)
-            # else: subtotal/total → descarta
-
-        pag_normal   = pag.loc[linhas_normais].copy()
-        pag_especial = pag.loc[linhas_especiais].copy()
-
-        # Enriquece linhas especiais com nome/categoria identificados
+        # Atribui nome/categoria para linhas especiais (pega texto de qualquer campo)
         if not pag_especial.empty:
-            if col_forn:
-                pag_especial[col_forn] = pag_especial.apply(
-                    lambda r: get_rotulo(r), axis=1)
-            if col_cat:
-                pag_especial[col_cat] = pag_especial.apply(
-                    lambda r: get_rotulo(r) + " / Pagamento Especial", axis=1)
+            def _busca_rotulo(row):
+                for c in pag.columns:
+                    if c == "__ap_tmp": continue
+                    v = str(row.get(c,"")).strip()
+                    if v and v.lower() not in VAZIOS:
+                        try:
+                            float(v.replace(",","."))
+                        except:
+                            return v.upper()
+                return "ESPECIAL"
+            rotulos = pag_especial.apply(_busca_rotulo, axis=1)
+            if col_forn: pag_especial = pag_especial.copy(); pag_especial[col_forn] = rotulos
+            if col_cat:  pag_especial = pag_especial.copy(); pag_especial[col_cat]  = rotulos + " / Pagamento Especial"
+            if not col_cat:
+                pag_especial["_cat_label"] = rotulos + " / Pagamento Especial"
 
-        # Junta tudo
         pag = pd.concat([pag_normal, pag_especial], ignore_index=True)
-
-        # Remove outliers residuais (> 100× o segundo maior valor)
-        val_ref_col = col_val_liq or col_val or col_a_pagar
-        if val_ref_col:
-            vals_sorted = pag[val_ref_col].apply(pv).sort_values(ascending=False)
-            if len(vals_sorted) > 1:
-                segundo_maior = vals_sorted.iloc[1]
-                if segundo_maior > 0:
-                    pag = pag[pag[val_ref_col].apply(pv) <= segundo_maior * 100].copy()
+        pag = pag.drop(columns=["__ap_tmp"], errors="ignore")
 
         srcs.append(f"Contas a Pagar ({len(pag)} contas)")
 
         # ═══════════════════════════════════════════════════
         # PASSO 3 — Converte valores (Hubsoft exporta NEGATIVOS — usa abs())
         # ═══════════════════════════════════════════════════
-        pag["_val"]       = pag[col_val].apply(pv)       if col_val      else 0.0
-        pag["_val_liq"]   = pag[col_val_liq].apply(pv)   if col_val_liq  else pag["_val"]
-        pag["_val_pago"]  = pag[col_val_pago].apply(pv)  if col_val_pago else 0.0
-        pag["_a_pagar"]   = pag[col_a_pagar].apply(pv)   if col_a_pagar  else (pag["_val_liq"] - pag["_val_pago"])
-        pag["_venc_dt"]   = pd.to_datetime(pag[col_venc], errors="coerce") if col_venc else pd.NaT
-        pag["_cat_pag"]   = pag[col_cat].fillna("Sem categoria").astype(str).str.strip() if col_cat else "Sem categoria"
-        pag["_forn"]      = pag[col_forn].fillna("").astype(str).str.strip() if col_forn else ""
-        pag["_dias_v"]    = (pag["_venc_dt"] - hoje).dt.days.fillna(999).astype(int)
+        pag["_val"]      = pag[col_val].apply(pv)      if col_val      else pd.Series([0.0]*len(pag))
+        pag["_val_liq"]  = pag[col_val_liq].apply(pv)  if col_val_liq  else pag["_val"].copy()
+        pag["_val_pago"] = pag[col_val_pago].apply(pv) if col_val_pago else pd.Series([0.0]*len(pag))
+        pag["_a_pagar"]  = pag[col_a_pagar].apply(pv)  if col_a_pagar  else (pag["_val_liq"] - pag["_val_pago"])
+        pag["_venc_dt"]  = pd.to_datetime(pag[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.Series([pd.NaT]*len(pag))
+        pag["_cat_pag"]  = pag[col_cat].fillna("Sem categoria").astype(str).str.strip() if col_cat else pd.Series(["Sem categoria"]*len(pag))
+        pag["_forn"]     = pag[col_forn].fillna("").astype(str).str.strip() if col_forn else pd.Series([""]*len(pag))
+        pag["_dias_v"]   = (pag["_venc_dt"] - hoje).dt.days.fillna(999).clip(-9999,9999).astype(int)
 
         # ═══════════════════════════════════════════════════
         # PASSO 4 — Classifica status pelo pagamento + vencimento
@@ -654,8 +629,12 @@ def recalc():
             "A pagar":       col_a_pagar  or "—",
         }
         st_session_pag = pag
+      except Exception as _pag_err:
+        import streamlit as _sterr
+        _sterr.warning(f"⚠️ Erro ao processar contas a pagar: {_pag_err}")
+        st_session_pag = pag  # usa os dados brutos como fallback
     else:
-        st_session_pag = pag
+        st_session_pag = pag if pag is not None else pd.DataFrame()
 
     # Salva estado
     st_session = st  # evitar conflito de nome
