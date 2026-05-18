@@ -172,11 +172,16 @@ class HubsoftAPI:
             resp = self._get(endpoint, p)
             pag  = resp.get("paginacao") or {}
 
-            # Loga totais na primeira chamada
-            if n_pag == 0 and pag:
+            # Loga estrutura na primeira chamada
+            if n_pag == 0:
                 total_esperado = pag.get("total_registros", "?")
                 ultima_pag     = pag.get("ultima_pagina", 0)
+                # Loga chaves da resposta para diagnóstico
+                resp_keys = list(resp.keys())
+                print(f"  Resp keys: {resp_keys}")
                 print(f"  Paginacao: total={total_esperado} paginas={ultima_pag+1} itens/pag={limit}")
+                if not bloco:
+                    print(f"  ATENÇÃO: bloco vazio! resp={str(resp)[:200]}")
 
             bloco = (resp.get("dados") or resp.get("data") or
                      resp.get("clientes") or resp.get("contratos") or
@@ -442,52 +447,40 @@ class HubsoftAPI:
 
         print(f"=== HUBSOFT importar_tudo({mes}) ===")
 
-        # A) Vencimento no mês — sem filtro de status (pega pagas + abertas do mês)
-        print("  Buscando faturas com vencimento no mês...")
-        cob_mes_venc = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
-        print(f"  → vencimento no mês: {len(cob_mes_venc)} faturas")
+        # ── Busca TODAS as faturas do mês por vencimento ─────────────
+        # Sem filtro de status — o Hubsoft retorna tudo que vence no período
+        print(f"  Buscando faturas venc {d_ini} a {d_fim}...")
+        cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+        print(f"  → {len(cob_mes)} faturas")
 
-        # B) Faturas em aberto (status=aberto) — período amplo (últimos 12 meses)
-        import datetime as _dt_imp
-        d_ini_hist = ((_dt_imp.datetime.strptime(d_ini, "%Y-%m-%d")
-                       - _dt_imp.timedelta(days=365)).strftime("%Y-%m-%d"))
-        print(f"  Buscando faturas abertas desde {d_ini_hist}...")
-        cob_abertas = self.get_cobrancas(d_ini_hist, d_fim, tipo_data="vencimento",
-                                         status_pag="aberto")
-        print(f"  → abertas (histórico 12m): {len(cob_abertas)} faturas")
+        # Se trouxe menos de 5, tenta buscar SEM filtro de data (tudo do sistema)
+        if len(cob_mes) < 5:
+            print("  Poucos resultados — tentando sem filtro de data...")
+            cob_all = self._paginar(self.COBRANCA_ENDPOINTS[0], {})
+            if len(cob_all) > len(cob_mes):
+                df_all = self._norm_cobrancas(pd.json_normalize(cob_all))
+                # Filtra pelo mês selecionado
+                if "data_vencimento" in df_all.columns:
+                    mask = (
+                        (df_all["data_vencimento"] >= pd.Timestamp(d_ini)) &
+                        (df_all["data_vencimento"] <= pd.Timestamp(d_fim))
+                    )
+                    cob_mes = df_all[mask].copy()
+                    print(f"  → filtrado do total: {len(cob_mes)} faturas")
 
-        # C) Combina: vencimento_mes + abertas_historico (sem duplicar)
-        id_col = "id_cobranca"
-        if not cob_mes_venc.empty and not cob_abertas.empty:
-            if id_col in cob_mes_venc.columns and id_col in cob_abertas.columns:
-                ids_venc = set(cob_mes_venc[id_col].astype(str))
-                novas_abertas = cob_abertas[
-                    ~cob_abertas[id_col].astype(str).isin(ids_venc)
-                ]
-            else:
-                novas_abertas = cob_abertas
-            cob_mes = pd.concat([cob_mes_venc, novas_abertas], ignore_index=True)
-        elif not cob_abertas.empty:
-            cob_mes = cob_abertas
-        else:
-            cob_mes = cob_mes_venc
+        cob_pagas = cob_mes  # referência para classificação
 
-        # Mantém cob_pagas como referência para classificação
-        cob_pagas = cob_mes_venc
-
-        print(f"  → Total combinado: {len(cob_mes)} faturas")
-
-        # D) rec_recebidos = faturas classificadas como PAGO no cob_mes
+        # ── Recebidos = faturas classificadas como PAGO ───────────────
         if not cob_mes.empty and "status" in cob_mes.columns:
             cob_rec = cob_mes[cob_mes["status"] == "PAGO"].copy()
             if cob_rec.empty and not cob_pagas.empty:
-                print("  ⚠️  0 PAGO — usando cob_pagas como fallback")
+                print("  0 PAGO — usando fallback (faturas sem status 'aberto')")
                 cob_rec = cob_pagas.copy()
                 cob_rec["status"] = "PAGO"
         else:
             cob_rec = pd.DataFrame()
 
-        print(f"  cob_rec (recebidos): {len(cob_rec)}")
+        print(f"  PAGO={len(cob_rec)} | Total={len(cob_mes)}")
         try:    clientes = self.get_clientes("ativo")
         except: clientes = pd.DataFrame()
 
