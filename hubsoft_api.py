@@ -163,24 +163,52 @@ class HubsoftAPI:
 
     def _paginar(self, endpoint, params=None, limit=100, max_pag=200):
         p = dict(params or {})
-        p["pagina"] = 0
-        p["limit"]  = limit
+        p["pagina"]          = 0
+        p["itens_por_pagina"]= limit   # Hubsoft usa itens_por_pagina, não limit
         dados = []
         for _ in range(max_pag):
             resp  = self._get(endpoint, p)
             bloco = (resp.get("dados") or resp.get("data") or
-                     resp.get("clientes") or resp.get("contratos") or [])
+                     resp.get("clientes") or resp.get("contratos") or
+                     resp.get("faturas") or resp.get("cobrancas") or [])
             if isinstance(bloco, list):
                 dados.extend(bloco)
             elif isinstance(bloco, dict) and bloco:
                 dados.append(bloco)
             pag    = resp.get("paginacao") or {}
-            ultima = pag.get("ultima_pagina", 0)
-            atual  = pag.get("pagina_atual",  p["pagina"])
+            ultima = pag.get("ultima_pagina",  0)
+            atual  = pag.get("pagina_atual",   p["pagina"])
             if not bloco or atual >= ultima:
                 break
             p["pagina"] = atual + 1
         return dados
+
+    def descobrir_endpoints(self):
+        """
+        Testa os endpoints mais comuns e retorna quais respondem 200.
+        Use para diagnosticar qual versão/configuração do Hubsoft está ativa.
+        """
+        self._ok_token()
+        candidatos = [
+            "/api/v1/integracao/financeiro/fatura",
+            "/api/v1/integracao/financeiro/cobranca",
+            "/api/v1/integracao/cliente/financeiro",
+            "/api/v1/integracao/cliente",
+            "/api/v1/integracao/contrato",
+            "/api/v1/integracao/plano",
+            "/api/v1/integracao/financeiro",
+            "/api/v1/integracao",
+            "/api/v1",
+        ]
+        resultado = {}
+        for ep in candidatos:
+            url = f"{self._base_ativo}{ep}"
+            try:
+                r = self.s.get(url, params={"pagina":0,"itens_por_pagina":1}, timeout=10)
+                resultado[ep] = r.status_code
+            except Exception as e:
+                resultado[ep] = str(e)[:40]
+        return resultado
 
     # ── CLIENTES ─────────────────────────────────────────────────────
     CLIENTE_ENDPOINTS = [
@@ -346,6 +374,13 @@ class HubsoftAPI:
         ult_dia  = calendar.monthrange(ano, m)[1]
         d_ini    = f"{mes}-01"
         d_fim    = f"{mes}-{ult_dia:02d}"
+
+        # Auto-descobre endpoints antes de importar
+        print(f"🔍 Descobrindo endpoints Hubsoft em {self._base_ativo}...")
+        eps = self.descobrir_endpoints()
+        for ep, st in eps.items():
+            icon = "✅" if st == 200 else f"❌{st}"
+            print(f"  {icon} {ep}")
 
         cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
         cob_rec = self.get_cobrancas(d_ini, d_fim, tipo_data="pagamento", pago=True)
