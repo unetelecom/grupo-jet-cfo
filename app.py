@@ -43,7 +43,8 @@ def parse_ofx(raw: str) -> dict:
         tipo = "entrada" if val > 0 else "saida"
         if val > 0: ent += val
         else:       sai += abs(val)
-        rows.append({"data":fmt8(dt),"tipo":tipo,"valor":val,"abs_valor":abs(val),"memo":memo})
+        rows.append({"data":fmt8(dt),"tipo":tipo,"valor":val,"abs_valor":abs(val),"memo":memo,
+                          "intercompany":eh_intercompany(memo)})
 
     try:    saldo_real = float(saldo_str)
     except: saldo_real = ent - sai
@@ -298,6 +299,24 @@ div[data-testid="stSidebar"] .stRadio label span{color:#AAA !important}
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
+# EMPRESAS DO GRUPO — excluídas da conciliação e dos extratos
+# (transferências intercompany não são receitas de clientes)
+# ══════════════════════════════════════════════════════════
+INTERCOMPANY_PADRAO = [
+    "RDMI PARTICIPACOES",
+    "RDMI PARTICIPAÇÕES",
+    "RRD TELECOM",
+    "GRUPO JET",
+    "JET TELECOM",
+]
+
+def eh_intercompany(memo: str, lista: list = None) -> bool:
+    """Retorna True se o memo da transação é uma transferência intercompany."""
+    lista = lista or INTERCOMPANY_PADRAO
+    memo_up = str(memo).upper()
+    return any(emp.upper() in memo_up for emp in lista)
+
+# ══════════════════════════════════════════════════════════
 # DADOS PRÉ-CONCILIADOS (BTG × Hubsoft Maio/2026)
 # 183 baixas aplicadas automaticamente
 # ══════════════════════════════════════════════════════════
@@ -347,7 +366,7 @@ for k, v in {
     "chat_history": [], "api_key": "",
     "data_src": "Sem dados importados",
     "last_update": None,
-    "hub_col_map": {}, "col_expanded": False, "hub_diag": {}, "pag_diag": {}, "ofx_df": None, "concil_result": None,
+    "hub_col_map": {}, "col_expanded": False, "hub_diag": {}, "pag_diag": {}, "ofx_df": None, "ofx_last_key": None, "ofx_saldo": 0.0, "concil_result": None, "intercompany_lista": INTERCOMPANY_PADRAO,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -550,9 +569,19 @@ def run_conciliacao(ofx_df, hub_df):
 
 
     # Apenas créditos do extrato (entradas = valor > 0)
+    # Apenas créditos reais — exclui transferências intercompany
     ofx_cred = ofx_df[ofx_df["valor"] > 0].copy() if "valor" in ofx_df.columns else pd.DataFrame()
-    if not ofx_cred.empty and "data" in ofx_cred.columns:
-        ofx_cred["data"] = pd.to_datetime(ofx_cred["data"], errors="coerce")
+    if not ofx_cred.empty:
+        if "data" in ofx_cred.columns:
+            ofx_cred["data"] = pd.to_datetime(ofx_cred["data"], errors="coerce")
+        # Remove intercompany se coluna existir
+        if "intercompany" in ofx_cred.columns:
+            n_antes = len(ofx_cred)
+            ofx_cred = ofx_cred[~ofx_cred["intercompany"]].copy()
+        elif "memo" in ofx_cred.columns:
+            # Fallback: filtra pelo memo
+            lista_ic = st.session_state.get("intercompany_lista", INTERCOMPANY_PADRAO)
+            ofx_cred = ofx_cred[~ofx_cred["memo"].apply(lambda m: eh_intercompany(m, lista_ic))].copy()
     if ofx_cred.empty: return pd.DataFrame()
 
     def _norm(s):
@@ -1670,7 +1699,58 @@ elif "Extratos" in page:
         ups = st.file_uploader("Extrato", type=["pdf","csv","ofx","txt","xlsx","xls"],
             accept_multiple_files=True, label_visibility="collapsed")
         if ups:
-            for f in ups: st.markdown(f"✅ **{f.name}** · {f.size//1024}KB")
+            # ── Auto-carrega OFX imediatamente ao fazer upload ──
+            for f in ups:
+                if f.name.lower().endswith(".ofx"):
+                    file_key = f"ofx_loaded_{f.name}_{f.size}"
+                    if st.session_state.get("ofx_last_key") != file_key:
+                        with st.spinner(f"📂 Carregando {f.name}..."):
+                            try:
+                                f.seek(0)
+                                for enc in ["latin-1","cp1252","utf-8"]:
+                                    try:
+                                        raw_ofx = f.read().decode(enc)
+                                        parsed  = parse_ofx(raw_ofx)
+                                        if parsed and parsed["df"] is not None and not parsed["df"].empty:
+                                            st.session_state.ofx_df    = parsed["df"]
+                                            st.session_state.ofx_saldo = parsed["saldo"]
+                                            st.session_state.ofx_last_key = file_key
+                                            # Atualiza stats bancários — exclui intercompany
+                                            df_ofx2 = parsed["df"]
+                                            lista_ic2 = st.session_state.get("intercompany_lista", INTERCOMPANY_PADRAO)
+                                            if "memo" in df_ofx2.columns:
+                                                mask_ic = df_ofx2["memo"].apply(lambda m: eh_intercompany(m, lista_ic2))
+                                                df_real = df_ofx2[~mask_ic]
+                                            else:
+                                                df_real = df_ofx2
+                                            ent_real = float(df_real[df_real["valor"]>0]["valor"].sum()) if len(df_real)>0 else 0.0
+                                            sai_real = float(df_real[df_real["valor"]<0]["valor"].abs().sum()) if len(df_real)>0 else 0.0
+                                            n_ic = int(mask_ic.sum()) if "memo" in df_ofx2.columns else 0
+                                            S2 = st.session_state.stats
+                                            S2["banco_entradas"]  = ent_real
+                                            S2["banco_saidas"]    = sai_real
+                                            S2["banco_saldo"]     = parsed["saldo"]
+                                            S2["banco_sem_hub"]   = 0.0
+                                            S2["banco_n_sem_hub"] = 0
+                                            st.session_state.stats = S2
+                                            st.success(
+                                                f"✅ **{f.name}** carregado automaticamente — "
+                                                f"{parsed['n_trans']} transações · "
+                                                f"Entradas: **{brl(parsed['entradas'])}** · "
+                                                f"Saldo: **{brl(parsed['saldo'])}**"
+                                            )
+                                        break
+                                    except: f.seek(0)
+                            except Exception as ex:
+                                st.warning(f"Não foi possível pré-carregar {f.name}: {ex}")
+                elif f.name.lower().endswith((".csv",".txt")):
+                    st.markdown(f"✅ **{f.name}** · {f.size//1024}KB")
+
+            # Mostra status do OFX já carregado
+            ofx_loaded = st.session_state.ofx_df
+            if ofx_loaded is not None and not ofx_loaded.empty:
+                n_ent = int((ofx_loaded["valor"] > 0).sum()) if "valor" in ofx_loaded.columns else 0
+                st.info(f"🏦 Extrato em memória: **{n_ent} entradas** · Total: **{brl(st.session_state.stats.get('banco_entradas',0))}**")
 
             if st.button("🤖 Analisar com CFO IA", type="primary", use_container_width=True):
                 with st.spinner("Lendo extrato completo..."):
@@ -1681,14 +1761,29 @@ elif "Extratos" in page:
                         name = f.name.lower()
                         try:
                             if name.endswith(".ofx"):
-                                # ── PARSER OFX COMPLETO (lê 100% das transações) ──
-                                f.seek(0)
-                                for enc in ["latin-1","cp1252","utf-8"]:
-                                    try:
-                                        raw_ofx = f.read().decode(enc)
-                                        ofx_data = parse_ofx(raw_ofx)
-                                        break
-                                    except: pass
+                                # ── Usa dados já parseados se disponíveis ──
+                                if st.session_state.ofx_df is not None:
+                                    ofx_data = {
+                                        "df":       st.session_state.ofx_df,
+                                        "entradas": st.session_state.stats.get("banco_entradas",0),
+                                        "saidas":   st.session_state.stats.get("banco_saidas",0),
+                                        "saldo":    st.session_state.stats.get("banco_saldo",0),
+                                        "n_trans":  len(st.session_state.ofx_df),
+                                        "banco":    "BTG Pactual",
+                                        "conta":    "",
+                                        "periodo":  "",
+                                        "top_ent":  [],
+                                        "top_sai":  [],
+                                        "cats":     {},
+                                    }
+                                else:
+                                    f.seek(0)
+                                    for enc in ["latin-1","cp1252","utf-8"]:
+                                        try:
+                                            raw_ofx = f.read().decode(enc)
+                                            ofx_data = parse_ofx(raw_ofx)
+                                            break
+                                        except: pass
 
                             elif name.endswith(".csv"):
                                 f.seek(0)
@@ -2338,6 +2433,22 @@ elif "Conciliação" in page:
     if not ok_ofx:
         st.info("📂 Envie o arquivo OFX acima para iniciar a conciliação.")
         st.stop()
+
+    # ── Configuração: empresas do grupo (intercompany) ──
+    with st.expander("⚙️ Empresas do grupo (excluídas da conciliação)", expanded=False):
+        st.caption("Transferências entre essas empresas são ignoradas — não são receitas de clientes.")
+        ic_atual = ", ".join(st.session_state.get("intercompany_lista", INTERCOMPANY_PADRAO))
+        ic_novo  = st.text_area("Uma empresa por linha ou separadas por vírgula:",
+                                value=ic_atual, height=100, key="ic_input")
+        if st.button("💾 Salvar lista", key="ic_save"):
+            lista_nova = [x.strip().upper() for x in ic_novo.replace("\n",",").split(",") if x.strip()]
+            st.session_state.intercompany_lista = lista_nova
+            # Regenera flag intercompany no ofx_df
+            if st.session_state.ofx_df is not None:
+                st.session_state.ofx_df["intercompany"] = st.session_state.ofx_df["memo"].apply(
+                    lambda m: eh_intercompany(m, lista_nova))
+            st.success(f"✅ Lista atualizada: {', '.join(lista_nova)}")
+            st.rerun()
 
     # ── Botão de conciliação ──
     col_btn, col_info = st.columns([1, 2])
