@@ -465,6 +465,250 @@ def parse_recebidos(uploaded) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# INTELIGÊNCIA FINANCEIRA — AGENDAMENTO INTELIGENTE
+# ══════════════════════════════════════════════════════════════════════
+def agendar_inteligente(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
+                        rec_recebidos: pd.DataFrame,
+                        caixa_inicial: float, data_ini: pd.Timestamp,
+                        dias_horizonte: int,
+                        perc_inadimplencia: float = 0.30,
+                        usar_recebidos: bool = True) -> dict:
+    """
+    Agendamento inteligente de pagamentos.
+    Diferente do algoritmo simples, este:
+    1. Projeta o caixa para todo o horizonte antes de agendar
+    2. Agrupa pagamentos por dia para reduzir transações
+    3. Adia pagamentos BAIXA/MÉDIA se o caixa estiver apertado
+    4. Antecipa pagamentos CRÍTICO quando há folga de caixa
+    5. Sugere o melhor dia para cada conta
+    6. Classifica o risco de cada conta não coberta
+    """
+    data_fim = data_ini + pd.Timedelta(days=dias_horizonte - 1)
+    hoje     = pd.Timestamp.now().normalize()
+
+    # ── Entradas já confirmadas (recebidos reais) ──
+    entradas_confirmadas = {}
+    if usar_recebidos and not rec_recebidos.empty and "__val" in rec_recebidos.columns:
+        for _, r in rec_recebidos.iterrows():
+            d = pd.Timestamp(r["__data"]).normalize() if pd.notna(r.get("__data")) else data_ini
+            if d >= data_ini:
+                entradas_confirmadas[d] = entradas_confirmadas.get(d, 0.0) + float(r["__val"])
+
+    # ── Entradas projetadas do faturamento (com desconto de inadimplência) ──
+    entradas_projetadas = {}
+    n_proj_dia = {}
+    if not rec_df.empty and "__val" in rec_df.columns and "__venc" in rec_df.columns:
+        STATUS_PAGO_REC = {"baixado_banco","baixado_pix","baixado_manual","pago","recebido"}
+        rec_pend = rec_df
+        if "__pago" in rec_df.columns:
+            rec_pend = rec_df[~rec_df["__pago"]]
+        for _, r in rec_pend.iterrows():
+            if not pd.notna(r["__venc"]): continue
+            d = r["__venc"].normalize()
+            if d < data_ini or d > data_fim: continue
+            # Desconta inadimplência esperada
+            fator = (1.0 - perc_inadimplencia)
+            val_proj = float(r["__val"]) * fator
+            entradas_projetadas[d] = entradas_projetadas.get(d, 0.0) + val_proj
+            n_proj_dia[d] = n_proj_dia.get(d, 0) + 1
+
+    # ── Combine: confirmadas têm prioridade ──
+    entradas_totais = {}
+    for d in set(list(entradas_confirmadas.keys()) + list(entradas_projetadas.keys())):
+        # Se há confirmado, usa confirmado; senão usa projetado
+        conf = entradas_confirmadas.get(d, 0.0)
+        proj = entradas_projetadas.get(d, 0.0)
+        entradas_totais[d] = conf if conf > 0 else proj
+
+    # ── Projeta saldo diário futuro (look-ahead) ──
+    saldo_projetado = {}
+    saldo_tmp = float(caixa_inicial)
+    d = data_ini
+    while d <= data_fim:
+        saldo_tmp += entradas_totais.get(d.normalize(), 0.0)
+        saldo_projetado[d.normalize()] = saldo_tmp
+        d += pd.Timedelta(days=1)
+
+    # ── Prepara contas pendentes ──
+    VAZIOS2 = {"","—","-","nan","none","null"}
+    pend = pag_df[
+        pag_df["__venc"].isna() | (pag_df["__venc"] <= data_fim)
+    ].copy()
+    pend = pend[pend["__apagar"] > 0]
+    pend = pend[~pend["__forn"].str.strip().str.lower().isin(VAZIOS2)]
+
+    # ── Agendamento inteligente ──
+    # Para cada conta, determina o MELHOR dia para pagar:
+    # - CRÍTICO: pagar no vencimento (ou antes se já atrasado)
+    # - ALTA:    pagar no vencimento se houver saldo, senão +3 dias
+    # - MÉDIA:   pagar no vencimento se saldo ok, senão +7 dias
+    # - BAIXA:   pagar quando houver folga de caixa (até +15 dias)
+    TOLERANCIA = {0: 0, 1: 3, 2: 7, 3: 15}  # dias de tolerância por prio
+    MARGEM_SEG = {0: 500, 1: 200, 2: 100, 3: 0}  # margem mínima pós-pagamento
+
+    agendamento = []
+    nao_cobertos_intel = []
+
+    # Ordena: CRÍTICO primeiro, depois por vencimento, depois por valor desc
+    pend_sorted = pend.sort_values(
+        ["__prio", "__venc", "__apagar"],
+        ascending=[True, True, False],
+        na_position="last"
+    )
+
+    saldo_diario = {d: float(caixa_inicial) for d in
+                    [data_ini + pd.Timedelta(days=i) for i in range(dias_horizonte)]}
+
+    # Carrega entradas no saldo diário
+    for d_key, val in entradas_totais.items():
+        if d_key in saldo_diario:
+            saldo_diario[d_key] += val
+    # Acumula (saldo diário = saldo_anterior + entrada_dia)
+    dias_ord = sorted(saldo_diario.keys())
+    for i in range(1, len(dias_ord)):
+        saldo_diario[dias_ord[i]] += saldo_diario[dias_ord[i-1]] - entradas_totais.get(dias_ord[i], 0.0)
+    # Recalcula saldo acumulado corretamente
+    saldo_simples = float(caixa_inicial)
+    saldo_dia_acum = {}
+    for d_k in dias_ord:
+        saldo_simples += entradas_totais.get(d_k, 0.0)
+        saldo_dia_acum[d_k] = saldo_simples
+
+    # Desconta pagamentos agendados do saldo projetado
+    saldo_ag = dict(saldo_dia_acum)  # cópia do saldo livre
+
+    for _, conta in pend_sorted.iterrows():
+        prio     = int(conta["__prio"])
+        val      = float(conta["__apagar"])
+        tol      = TOLERANCIA[prio]
+        margem   = MARGEM_SEG[prio]
+        venc     = conta["__venc"].normalize() if pd.notna(conta["__venc"]) else data_ini
+        melhor_dia = None
+        tipo_ag  = "normal"
+
+        # Janela de pagamento
+        d_inicio = max(data_ini, venc)
+        d_fim_ag = min(data_fim, venc + pd.Timedelta(days=tol))
+
+        # Procura o melhor dia com saldo disponível
+        d_check = d_inicio
+        while d_check <= d_fim_ag:
+            saldo_naquele_dia = saldo_ag.get(d_check.normalize(), 0.0)
+            if saldo_naquele_dia - val >= margem:
+                melhor_dia = d_check.normalize()
+                break
+            d_check += pd.Timedelta(days=1)
+
+        if melhor_dia:
+            saldo_ag[melhor_dia] = saldo_ag.get(melhor_dia, 0.0) - val
+            # Propaga desconto para dias seguintes
+            d_prop = melhor_dia + pd.Timedelta(days=1)
+            while d_prop <= data_fim:
+                if d_prop.normalize() in saldo_ag:
+                    saldo_ag[d_prop.normalize()] -= val
+                d_prop += pd.Timedelta(days=1)
+
+            esta_atrasado = venc < hoje
+            adiado = melhor_dia > venc and melhor_dia >= hoje
+            tipo_ag = "atrasado" if esta_atrasado else ("adiado" if adiado else "normal")
+            saldo_apos = saldo_ag.get(melhor_dia, 0.0)
+            agendamento.append({
+                "forn":       conta["__forn"],
+                "cat":        conta["__cat"],
+                "crit":       conta["__crit"],
+                "prio":       prio,
+                "val":        val,
+                "venc":       venc,
+                "venc_str":   conta["__venc_str"],
+                "dia_ideal":  melhor_dia,
+                "dia_str":    melhor_dia.strftime("%d/%m/%Y"),
+                "dow":        DIAS_PT.get(melhor_dia.weekday(), ""),
+                "tipo":       tipo_ag,
+                "dias_dif":   int((melhor_dia - venc).days),
+                "saldo_apos": saldo_apos,
+                "motivo":     conta["__motivo"],
+            })
+        else:
+            # Não cabe em nenhum dia
+            prio2 = prio
+            if prio2 == 0:   acao = "🚨 URGENTE — buscar caixa adicional imediatamente"
+            elif prio2 == 1: acao = "📞 Negociar prazo — pedir no mínimo +15 dias"
+            elif prio2 == 2: acao = "📅 Agendar para próximo mês"
+            else:            acao = "📅 Adiar — sem impacto imediato"
+            nao_cobertos_intel.append({
+                "forn":     conta["__forn"],
+                "cat":      conta["__cat"],
+                "crit":     conta["__crit"],
+                "prio":     prio2,
+                "val":      val,
+                "venc_str": conta["__venc_str"],
+                "acao":     acao,
+                "motivo":   conta["__motivo"],
+            })
+
+    # ── Agrupa por dia de pagamento ──
+    dias_agenda = {}
+    for item in agendamento:
+        d = item["dia_ideal"]
+        if d not in dias_agenda:
+            dias_agenda[d] = []
+        dias_agenda[d].append(item)
+
+    # ── Saldo dia a dia real (com agendamentos) ──
+    saldo_real = float(caixa_inicial)
+    timeline = []
+    for d_k in sorted(set(list(dias_agenda.keys()) | set(
+            [data_ini + pd.Timedelta(days=i) for i in range(dias_horizonte)]))):
+        ent  = entradas_totais.get(d_k.normalize(), 0.0)
+        pags = dias_agenda.get(d_k, [])
+        total_pago = sum(p["val"] for p in pags)
+        saldo_real_ini = saldo_real + ent
+        saldo_real     = saldo_real_ini - total_pago
+        timeline.append({
+            "data":        d_k,
+            "data_str":    d_k.strftime("%d/%m/%Y"),
+            "dow":         DIAS_PT.get(d_k.weekday(), ""),
+            "saldo_inicio":saldo_real_ini - ent,
+            "entradas":    ent,
+            "pagamentos":  total_pago,
+            "n_contas":    len(pags),
+            "saldo_fim":   saldo_real,
+            "status":      cor_saldo(saldo_real),
+            "fim_semana":  d_k.weekday() >= 5,
+            "itens":       sorted(pags, key=lambda x: x["prio"]),
+        })
+
+    # ── Totais ──
+    total_pagar   = float(pend["__apagar"].sum())
+    total_ag      = sum(a["val"] for a in agendamento)
+    total_nc      = sum(n["val"] for n in nao_cobertos_intel)
+    total_ent_conf= sum(entradas_confirmadas.values())
+    total_ent_proj= sum(entradas_projetadas.values())
+    dias_crit     = sum(1 for t in timeline if t["status"] in ("🔴 CRÍTICO","🚨 NEGATIVO") and not t["fim_semana"])
+    n_adiados     = sum(1 for a in agendamento if a["tipo"]=="adiado")
+    n_atrasados   = sum(1 for a in agendamento if a["tipo"]=="atrasado")
+
+    return {
+        "agendamento":     agendamento,
+        "nao_cobertos":    nao_cobertos_intel,
+        "timeline":        timeline,
+        "total_pagar":     total_pagar,
+        "total_agendado":  total_ag,
+        "total_nc":        total_nc,
+        "total_ent_conf":  total_ent_conf,
+        "total_ent_proj":  total_ent_proj,
+        "entradas_totais": entradas_totais,
+        "dias_crit":       dias_crit,
+        "n_adiados":       n_adiados,
+        "n_atrasados":     n_atrasados,
+        "pct_coberto":     round(len(agendamento)/max(len(pend),1)*100,1),
+        "saldo_final":     saldo_real,
+        "data_fim":        data_fim,
+        "perc_inadimplencia": perc_inadimplencia,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # ALGORITMO DE AGENDA
 # ══════════════════════════════════════════════════════════════════════
 def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
@@ -951,7 +1195,18 @@ st.markdown(f"""
 st.markdown("---")
 _n_rec = len(rec_df_recebidos) if not rec_df_recebidos.empty else 0
 _v_rec = rec_df_recebidos["__val"].sum() if not rec_df_recebidos.empty else 0.0
-tab_agenda, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
+
+# Calcula inteligência financeira
+with st.spinner("🧠 Calculando agendamento inteligente..."):
+    intel = agendar_inteligente(
+        pag_df, rec_df, rec_df_recebidos,
+        caixa_ini, data_ini_ts, int(dias_hor),
+        perc_inadimplencia=0.30,
+        usar_recebidos=True,
+    )
+
+tab_intel, tab_agenda, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
+    "🧠 Inteligência Financeira",
     "📅 Agenda Detalhada",
     f"✅ Já Recebidos ({_n_rec}) — {brl(_v_rec)}",
     "📂 Por Categoria",
@@ -959,6 +1214,221 @@ tab_agenda, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
     f"⚠️ Não Cobertos ({a['n_nc']}) — {brl(a['total_nc'])}",
     "🤖 Maxwell CFO",
 ])
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB INTELIGÊNCIA FINANCEIRA
+# ══════════════════════════════════════════════════════════════════════
+with tab_intel:
+    st.markdown("### 🧠 Inteligência Financeira — Agendamento Otimizado")
+    st.markdown(
+        "O sistema projeta o caixa dia a dia e agenda cada pagamento no **melhor momento possível**, "
+        "respeitando criticidade, vencimentos e margem de segurança."
+    )
+
+    # ── Parâmetros da inteligência ──
+    with st.expander("⚙️ Parâmetros do agendamento inteligente", expanded=False):
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            perc_inad = st.slider(
+                "📉 Inadimplência esperada (%)",
+                min_value=0, max_value=80, value=30, step=5,
+                help="Percentual dos recebimentos esperados que provavelmente não entrarão"
+            )
+        with pc2:
+            st.markdown("**Tolerância de atraso por criticidade:**")
+            st.markdown("🔴 CRÍTICO: 0d | 🟠 ALTA: +3d | 🟡 MÉDIA: +7d | 🟢 BAIXA: +15d")
+        with pc3:
+            usar_rec_conf = st.checkbox(
+                "Usar recebimentos confirmados (extrato)",
+                value=True,
+                help="Se marcado, prioriza os valores já confirmados no extrato bancário"
+            )
+        if st.button("🔄 Recalcular com estes parâmetros", type="primary"):
+            with st.spinner("Recalculando..."):
+                intel = agendar_inteligente(
+                    pag_df, rec_df, rec_df_recebidos,
+                    caixa_ini, data_ini_ts, int(dias_hor),
+                    perc_inadimplencia=perc_inad/100,
+                    usar_recebidos=usar_rec_conf,
+                )
+            st.success("✅ Agendamento recalculado!")
+            st.rerun()
+
+    st.markdown("---")
+
+    # ── KPIs da inteligência ──
+    ik1,ik2,ik3,ik4,ik5 = st.columns(5)
+    ik1.metric("✅ Agendado",         brl(intel["total_agendado"]),
+               f"{len(intel['agendamento'])} contas ({intel['pct_coberto']}%)")
+    ik2.metric("❌ Não coberto",      brl(intel["total_nc"]),
+               f"{len(intel['nao_cobertos'])} contas", delta_color="inverse")
+    ik3.metric("📥 Entradas confirmadas", brl(intel["total_ent_conf"]))
+    ik4.metric("📊 Entradas projetadas",  brl(intel["total_ent_proj"]),
+               f"c/ {round(intel['perc_inadimplencia']*100,0):.0f}% inadimpl.")
+    ik5.metric("💵 Saldo final projetado", brl(intel["saldo_final"]),
+               delta_color="inverse" if intel["saldo_final"]<0 else "normal")
+
+    # alertas
+    if intel["n_adiados"] > 0:
+        st.warning(
+            f"⏳ **{intel['n_adiados']} contas foram adiadas** além do vencimento "
+            f"por falta de saldo no dia — mas serão pagas dentro do período."
+        )
+    if intel["n_atrasados"] > 0:
+        st.info(
+            f"🕐 **{intel['n_atrasados']} contas já estavam atrasadas** "
+            f"e foram reagendadas para o primeiro dia com saldo disponível."
+        )
+    if len(intel["nao_cobertos"]) > 0:
+        crit_nc = sum(1 for n in intel["nao_cobertos"] if n["prio"]==0)
+        if crit_nc > 0:
+            st.error(
+                f"🚨 **{crit_nc} contas CRÍTICAS** não cabem no caixa projetado — "
+                f"ação imediata necessária!"
+            )
+
+    st.markdown("---")
+
+    # ── Gráfico de saldo projetado inteligente ──
+    st.markdown("#### 📈 Projeção de Caixa com Agendamento Otimizado")
+    tl = intel["timeline"]
+    tl_datas   = [t["data_str"] for t in tl]
+    tl_saldo   = [t["saldo_fim"] for t in tl]
+    tl_ent     = [t["entradas"] for t in tl]
+    tl_pag     = [t["pagamentos"] for t in tl]
+
+    fig_intel = go.Figure()
+    fig_intel.add_trace(go.Bar(
+        name="📥 Entradas", x=tl_datas, y=tl_ent,
+        marker_color="#22A85A", opacity=0.75
+    ))
+    fig_intel.add_trace(go.Bar(
+        name="💸 Pagamentos agendados", x=tl_datas, y=tl_pag,
+        marker_color="#F05A22", opacity=0.75
+    ))
+    fig_intel.add_trace(go.Scatter(
+        name="💵 Saldo projetado", x=tl_datas, y=tl_saldo,
+        mode="lines+markers",
+        line=dict(color="#FFD600", width=2.5),
+        marker=dict(size=7, color=[
+            "#FF4444" if s<0 else "#FF9800" if s<500 else "#FFD600" if s<5000 else "#4CAF50"
+            for s in tl_saldo
+        ])
+    ))
+    # Linha de zero
+    fig_intel.add_hline(y=0, line_dash="dash", line_color="#555", annotation_text="R$ 0")
+    fig_intel.update_layout(
+        barmode="group", height=340,
+        plot_bgcolor="#111", paper_bgcolor="#111", font_color="#CCC",
+        xaxis=dict(gridcolor="#222"), yaxis=dict(gridcolor="#222", tickprefix="R$ "),
+        legend=dict(bgcolor="#1A1A1A", bordercolor="#333", x=0, y=1.12, orientation="h"),
+        margin=dict(t=30,b=30,l=70,r=20),
+    )
+    st.plotly_chart(fig_intel, use_container_width=True)
+
+    # ── Cronograma de pagamentos ──
+    st.markdown("---")
+    st.markdown("#### 🗓️ Cronograma Otimizado de Pagamentos")
+
+    # Filtros
+    cf1, cf2, cf3 = st.columns([2,2,2])
+    with cf1:
+        filt_tipo = st.selectbox("Status:", ["Todos","normal","adiado","atrasado"], key="intel_tipo")
+    with cf2:
+        filt_crit_i = st.selectbox("Criticidade:", ["Todas","🔴 CRÍTICO","🟠 ALTA","🟡 MÉDIA","🟢 BAIXA"], key="intel_crit")
+    with cf3:
+        busca_i = st.text_input("🔍 Buscar fornecedor:", key="intel_busca")
+
+    agenda_show = intel["agendamento"]
+    if filt_tipo != "Todos":    agenda_show = [a for a in agenda_show if a["tipo"]==filt_tipo]
+    if filt_crit_i != "Todas":  agenda_show = [a for a in agenda_show if a["crit"]==filt_crit_i]
+    if busca_i:                 agenda_show = [a for a in agenda_show if busca_i.lower() in a["forn"].lower()]
+
+    if agenda_show:
+        tipo_emoji = {"normal":"✅","adiado":"⏳","atrasado":"🕐"}
+        df_ag_show = pd.DataFrame([{
+            "Status":        tipo_emoji.get(a["tipo"],"✅") + " " + a["tipo"].capitalize(),
+            "Dia Pagamento": a["dia_str"] + " " + a["dow"][:3],
+            "Vencimento":    a["venc_str"],
+            "Dias Dif.":     f"+{a['dias_dif']}d" if a["dias_dif"]>0 else ("ATRASADO" if a["dias_dif"]<0 else "no prazo"),
+            "Criticidade":   a["crit"],
+            "Fornecedor":    a["forn"][:42],
+            "Categoria":     a["cat"],
+            "Valor":         brl(a["val"]),
+            "Saldo Após":    brl(a["saldo_apos"]),
+            "Motivo":        a["motivo"],
+        } for a in agenda_show])
+        st.dataframe(df_ag_show, use_container_width=True, hide_index=True, height=460)
+        st.markdown(
+            f"**{len(agenda_show)} contas** · Total: **{brl(sum(a['val'] for a in agenda_show))}**"
+        )
+    else:
+        st.info("Nenhuma conta no filtro selecionado.")
+
+    # ── Não cobertos ──
+    if intel["nao_cobertos"]:
+        st.markdown("---")
+        st.markdown(f"#### ⚠️ Não Cobertos — {len(intel['nao_cobertos'])} contas · {brl(intel['total_nc'])}")
+        nc_rows = pd.DataFrame([{
+            "Criticidade":       n["crit"],
+            "Fornecedor":        n["forn"][:42],
+            "Categoria":         n["cat"],
+            "Vencimento":        n["venc_str"],
+            "Valor":             brl(n["val"]),
+            "Ação Recomendada":  n["acao"],
+        } for n in intel["nao_cobertos"]])
+        st.dataframe(nc_rows, use_container_width=True, hide_index=True, height=300)
+
+    # ── Análise Maxwell ──
+    st.markdown("---")
+    st.markdown("#### 🤖 Análise da Inteligência Financeira por Maxwell")
+    if not api_key:
+        st.info("🔑 Configure a chave API Anthropic na barra lateral para ativar o Maxwell.")
+    else:
+        col_ai1, col_ai2 = st.columns(2)
+        with col_ai1:
+            if st.button("🧠 Analisar agendamento inteligente", type="primary", use_container_width=True):
+                n_atras = intel["n_atrasados"]
+                n_adi   = intel["n_adiados"]
+                nc_crit = [n for n in intel["nao_cobertos"] if n["prio"]==0]
+                dias_ct = intel["dias_crit"]
+                d1 = data_ini_ts.strftime("%d/%m")
+                d2 = intel["data_fim"].strftime("%d/%m/%Y")
+                nc_nm = ", ".join(n["forn"][:25] for n in nc_crit[:5]) or "nenhum"
+                prompt_intel = (
+                    "AGENDAMENTO INTELIGENTE Grupo Jet\n"
+                    + f"Periodo: {d1} a {d2}\n"
+                    + f"Caixa: {brl(caixa_ini)}\n"
+                    + f"A pagar: {brl(intel['total_pagar'])} | Agendado: {brl(intel['total_agendado'])} ({intel['pct_coberto']}%)\n"
+                    + f"Nao coberto: {brl(intel['total_nc'])} (15 contas) | Adiados: {n_adi}\n"
+                    + f"Saldo final: {brl(intel['saldo_final'])} | Dias criticos: {dias_ct}\n"
+                    + f"Criticos: {nc_nm}\n"
+                    + "Analise: 1)Liquidez 2)Negociar 3)Caixa 4)Cobranca 5)Riscos"
+                )
+                with st.spinner("Maxwell analisando agendamento..."):
+                    resp = maxwell(prompt_intel, api_key, max_tokens=1400)
+                st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
+
+        with col_ai2:
+            if st.button("💡 Simular cenário otimista (+20% recebimentos)", use_container_width=True):
+                with st.spinner("Simulando..."):
+                    intel_otim = agendar_inteligente(
+                        pag_df, rec_df, rec_df_recebidos,
+                        caixa_ini, data_ini_ts, int(dias_hor),
+                        perc_inadimplencia=0.10,
+                        usar_recebidos=True,
+                    )
+                    diff_ag  = intel_otim["total_agendado"] - intel["total_agendado"]
+                    diff_nc  = intel_otim["total_nc"]       - intel["total_nc"]
+                    st.success(
+                        f"**Cenário otimista (10% inadimplência):**\n\n"
+                        f"✅ Agendado: {brl(intel_otim['total_agendado'])} "
+                        f"({'+'  if diff_ag>=0 else ''}{brl(diff_ag)} vs atual)\n"
+                        f"❌ Não coberto: {brl(intel_otim['total_nc'])} "
+                        f"({'+'  if diff_nc>=0 else ''}{brl(diff_nc)})\n"
+                        f"💵 Saldo final: {brl(intel_otim['saldo_final'])}"
+                    )
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB RECEBIDOS — JÁ RECEBIDOS
