@@ -257,13 +257,15 @@ class HubsoftAPI:
     ]
 
     def get_cobrancas(self, data_ini, data_fim,
-                      tipo_data="vencimento", pago=None):
+                      tipo_data="vencimento", pago=None, status_pag=None):
         params = {
             f"data_{tipo_data}_ini": data_ini,
             f"data_{tipo_data}_fim": data_fim,
         }
         if pago is not None:
             params["pago"] = int(pago)
+        if status_pag:
+            params["status_pagamento"] = status_pag
 
         # Tenta cada endpoint até achar um que funcione
         last_err = None
@@ -372,21 +374,33 @@ class HubsoftAPI:
             mes = datetime.now().strftime("%Y-%m")
         ano, m   = map(int, mes.split("-"))
         ult_dia  = calendar.monthrange(ano, m)[1]
-        d_ini    = f"{mes}-01"
-        d_fim    = f"{mes}-{ult_dia:02d}"
+        d_ini    = f"{mes}-01"              # sempre do dia 1
+        d_fim    = f"{mes}-{ult_dia:02d}"  # até o último dia do mês
 
-        # Busca TODAS as cobranças do mês (pagas + abertas + atrasadas)
-        # Sem filtro de status para pegar tudo
-        cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+        # ── Busca faturas abertas (status_pagamento=aberto) ──────────────
+        cob_abertas = self.get_cobrancas(
+            d_ini, d_fim, tipo_data="vencimento", status_pag="aberto"
+        )
+        # ── Busca faturas pagas no mês (por data de pagamento) ────────
+        cob_pagas = self.get_cobrancas(
+            d_ini, d_fim, tipo_data="pagamento", pago=True
+        )
+        # ── Combina: todas = abertas + pagas ──────────────────────────
+        if not cob_abertas.empty and not cob_pagas.empty:
+            cob_mes = pd.concat([cob_abertas, cob_pagas], ignore_index=True)
+            cob_mes = cob_mes.drop_duplicates(subset=["id_cobranca"] if "id_cobranca" in cob_mes.columns else None)
+        elif not cob_abertas.empty:
+            cob_mes = cob_abertas
+        elif not cob_pagas.empty:
+            cob_mes = cob_pagas
+        else:
+            # Fallback: tenta sem filtro de status
+            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
 
-        # Busca também recebimentos do mês por data de pagamento
-        # (captura pagamentos de cobranças de meses anteriores)
-        cob_rec = self.get_cobrancas(d_ini, d_fim, tipo_data="pagamento", pago=True)
+        # Recebimentos por data de pagamento (para o rec_recebidos)
+        cob_rec = cob_pagas if not cob_pagas.empty else pd.DataFrame()
 
-        # Se cob_mes retornou vazio, tenta sem filtro de data de vencimento
-        # usando data de lançamento
-        if cob_mes.empty:
-            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="lancamento")
+        print(f"  Abertas: {len(cob_abertas)} | Pagas: {len(cob_pagas)} | Total: {len(cob_mes)}")
         try:    clientes = self.get_clientes("ativo")
         except: clientes = pd.DataFrame()
 
@@ -426,7 +440,7 @@ class HubsoftAPI:
             "adimplencia":  round(len(pagas)/max(len(cob_mes),1)*100,1),
             "mes":          mes,
             "fonte":        "hubsoft_api",
-            "atualizado_em":datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "atualizado_em":(datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M"),
         }
         return {
             "rec_df":        rec_df,
