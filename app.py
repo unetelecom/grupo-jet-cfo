@@ -1036,10 +1036,16 @@ def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
 def maxwell(prompt: str, api_key: str, max_tokens: int = 1000) -> str:
     if not _HAS_AI:
         return "⚠️ Biblioteca anthropic não instalada. Execute: pip install anthropic"
+    # Limpa a chave (remove espaços, quebras de linha)
+    key = (api_key or "").strip().replace("\n","").replace("\r","").replace(" ","")
+    if not key:
+        return "⚠️ Chave API não informada. Insira a chave na barra lateral."
+    if not key.startswith("sk-ant-"):
+        return f"⚠️ Chave inválida — deve começar com 'sk-ant-'. Verifique a chave copiada."
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=max_tokens,
             system=(
                 "Você é Maxwell, CFO IA do Grupo Jet Telecom. "
@@ -1050,7 +1056,12 @@ def maxwell(prompt: str, api_key: str, max_tokens: int = 1000) -> str:
         )
         return msg.content[0].text
     except Exception as e:
-        return f"Erro na IA: {e}"
+        err = str(e)
+        if "401" in err or "authentication" in err.lower():
+            return "❌ Chave API inválida ou expirada. Gere uma nova em console.anthropic.com"
+        if "429" in err or "rate" in err.lower():
+            return "⏳ Limite de requisições atingido. Aguarde alguns segundos e tente novamente."
+        return f"Erro na IA: {err}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1107,7 +1118,27 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🤖 CFO IA — Maxwell")
-    api_key = st.text_input("Chave API Anthropic", type="password", key="api_key")
+
+    # Tenta carregar do Streamlit Secrets primeiro (deploy)
+    _secret_key = ""
+    try:
+        _secret_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except:
+        pass
+
+    if _secret_key:
+        api_key = _secret_key
+        st.success("🔑 Chave API carregada dos Secrets", icon="✅")
+    else:
+        api_key = st.text_input(
+            "Chave API Anthropic",
+            type="password",
+            key="api_key",
+            placeholder="sk-ant-api03-...",
+            help="Gere sua chave em console.anthropic.com → API Keys"
+        )
+        if api_key and not api_key.strip().startswith("sk-ant-"):
+            st.error("⚠️ Chave inválida — deve começar com 'sk-ant-'")
 
     st.markdown("---")
     st.markdown(
