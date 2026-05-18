@@ -513,10 +513,9 @@ def run_conciliacao(ofx_df, hub_df):
         "baixado_cartao","baixado_dinheiro","baixado","pago","recebido","quitado"
     }
 
-    # Apenas cobranças ainda pendentes
     col_nome  = dcol(hub_df,"nome","razaosocial","nome_razaosocial","cliente","name")
-    col_val   = dcol(hub_df,"valor","value","amount","mensalidade")
-    col_venc  = dcol(hub_df,"data_vencimento","datavencimento","vencimento","duedate")
+    col_val   = dcol(hub_df,"valor","value","amount","mensalidade","valorcobranca","valorliquido")
+    col_venc  = dcol(hub_df,"data_vencimento","datavencimento","vencimento","duedate","datavenc")
     col_st    = dcol(hub_df,"status","situacao","estado")
 
     if not col_nome or not col_val: return pd.DataFrame()
@@ -527,13 +526,28 @@ def run_conciliacao(ofx_df, hub_df):
     hub["_venc_c"] = pd.to_datetime(hub[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.NaT
     hub["_st_c"]   = hub[col_st].fillna("").astype(str).str.lower().str.strip() if col_st else ""
 
-    hub_pend = hub[
-        (~hub["_st_c"].isin(STATUS_REC)) &
-        (hub["_nome_c"].str.len() >= 2) &
-        (hub["_val_c"] > 0)
-    ].copy()
+    # Se planilha é FATURAMENTO PURO (sem status ou status = faturado/em_aberto):
+    # concilia TUDO — o banco determina o que foi pago
+    # Se tem baixas já registradas: exclui as já pagas para evitar duplicatas
+    status_vals = set(hub["_st_c"].unique())
+    so_faturado = not bool(status_vals & STATUS_REC)  # nenhum status de "baixado"
+
+    if so_faturado:
+        # Planilha de faturamento puro → inclui todos
+        hub_pend = hub[
+            (hub["_nome_c"].str.len() >= 2) &
+            (hub["_val_c"] > 0)
+        ].copy()
+    else:
+        # Planilha mista (tem baixados + pendentes) → exclui os já baixados
+        hub_pend = hub[
+            (~hub["_st_c"].isin(STATUS_REC)) &
+            (hub["_nome_c"].str.len() >= 2) &
+            (hub["_val_c"] > 0)
+        ].copy()
 
     if hub_pend.empty: return pd.DataFrame()
+
 
     # Apenas créditos do extrato (entradas = valor > 0)
     ofx_cred = ofx_df[ofx_df["valor"] > 0].copy() if "valor" in ofx_df.columns else pd.DataFrame()
@@ -2213,7 +2227,38 @@ elif "Contas" in page:
 # ══════════════════════════════════════════════════════════
 elif "Conciliação" in page:
     st.markdown("## 🔄 Conciliação Bancária")
-    st.markdown("**Cruza o extrato bancário com as cobranças a receber e baixa automaticamente os pagamentos identificados.**")
+    st.markdown("**Cruza o extrato bancário (o que entrou no banco) com o faturamento Hubsoft (o que foi cobrado) e identifica automaticamente o que foi pago.**")
+
+    # Guia de exportação do Hubsoft
+    with st.expander("📋 Como exportar do Hubsoft para conciliar", expanded=False):
+        st.markdown("""
+        **No Hubsoft, exporte o faturamento do mês:**
+
+        > **Caminho:** Financeiro → Relatórios → Contas a Receber / Faturamento → Exportar Excel
+
+        **Filtros recomendados:**
+        - Período: mês desejado (ex: 01/05 a 31/05)
+        - Status: **Todos** (aguardando, baixado_*, vencido)
+
+        **Colunas mínimas necessárias:**
+
+        | Coluna | O que é |
+        |--------|---------|
+        | `nome_razaosocial` | Nome do cliente |
+        | `valor` | Valor faturado |
+        | `data_vencimento` | Data de vencimento da cobrança |
+
+        **Colunas opcionais (melhoram a precisão):**
+        - `id_cobranca` — ID único da fatura
+        - `status` — situação atual (aguardando, baixado_*, vencido)
+        - `servico` — serviço contratado
+
+        **O sistema vai:**
+        1. Cruzar cada entrada do banco com as cobranças por **valor + data**
+        2. Para PIX/TED: valida também pelo **nome do remetente**
+        3. Marcar como `baixado_banco` os que encontrou no extrato
+        4. Apontar o que ficou sem match (cobranças não recebidas)
+        """)
     show_src()
 
     hub   = st.session_state.hub_df
