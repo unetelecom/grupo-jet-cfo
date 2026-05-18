@@ -113,6 +113,21 @@ def pv(v) -> float:
     except:
         return 0.0
 
+def parse_date(series: pd.Series) -> pd.Series:
+    """
+    Parser robusto de datas — aceita todos os formatos:
+    - ISO: '2026-05-10' ou '2026-05-10 00:00:00'  (Excel com hora)
+    - BR:  '10/05/2026' ou '10-05-2026'            (formato brasileiro)
+    """
+    # 1ª tentativa: ISO/automático (funciona para datas do Excel)
+    result = pd.to_datetime(series, errors='coerce')
+    # 2ª tentativa: formato BR para os que falharam
+    mask = result.isna() & series.fillna('').astype(str).str.strip().ne('')
+    if mask.any():
+        result[mask] = pd.to_datetime(series[mask], dayfirst=True, errors='coerce')
+    return result.dt.normalize()
+
+
 def norm_col(s: str) -> str:
     """Normaliza nome de coluna para matching."""
     s = unicodedata.normalize("NFKD", str(s).lower())
@@ -258,7 +273,7 @@ def parse_pagar(uploaded) -> pd.DataFrame:
     df["__cat"]    = df[col_cat].fillna("Outros").astype(str).str.strip() if col_cat else "Outros"
     df["__vliq"]   = df[col_vliq].apply(pv) if col_vliq else 0.0
     df["__vpago"]  = df[col_vpago].apply(pv) if col_vpago else 0.0
-    df["__venc"]   = pd.to_datetime(df[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.NaT
+    df["__venc"]   = parse_date(df[col_venc]) if col_venc else pd.NaT
     df["__status_orig"] = df[col_status].fillna("").astype(str) if col_status else ""
 
     # A Pagar: usa coluna específica ou calcula
@@ -322,7 +337,7 @@ def parse_receber(uploaded) -> pd.DataFrame:
 
     df["__nome"] = df[col_nome].fillna("Cliente").astype(str).str.strip() if col_nome else "Cliente"
     df["__val"]  = df[col_val].apply(pv)
-    df["__venc"] = pd.to_datetime(df[col_venc], dayfirst=True, errors="coerce")
+    df["__venc"] = parse_date(df[col_venc])
     df["__st"]   = df[col_st].fillna("").astype(str).str.lower().str.strip() if col_st else "faturado"
     df["__pago"] = df["__st"].isin(STATUS_PAGO)
 
