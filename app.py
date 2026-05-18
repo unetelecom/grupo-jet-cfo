@@ -635,12 +635,27 @@ def aplicar_baixas(hub_df, matches_selecionados):
     col_dpag  = dcol(hub_df,"data_pagamento","datapagamento","pagamento")
 
     hub = hub_df.copy()
+
+    # Converte colunas editáveis para object (str) para evitar TypeError de dtype
+    for col in [col_st, col_vpago, col_dpag]:
+        if col and col in hub.columns:
+            hub[col] = hub[col].astype(object)
+
     for _, m in matches_selecionados.iterrows():
-        idx = m["hub_idx"]
-        if idx in hub.index:
-            if col_st:    hub.at[idx, col_st]    = "baixado_banco"
-            if col_vpago: hub.at[idx, col_vpago] = str(m["val_ofx"])
-            if col_dpag:  hub.at[idx, col_dpag]  = m["data_ofx"]
+        try:
+            idx = int(m["hub_idx"])
+        except (ValueError, TypeError):
+            continue
+        if idx not in hub.index:
+            continue
+        if col_st:
+            hub.at[idx, col_st] = "baixado_banco"
+        if col_vpago:
+            val_str = str(round(float(m["val_ofx"]), 2)) if m["val_ofx"] else "0"
+            hub.at[idx, col_vpago] = val_str
+        if col_dpag:
+            hub.at[idx, col_dpag] = str(m.get("data_ofx", ""))
+
     return hub
 
 # ══════════════════════════════════════════════════════════
@@ -1424,11 +1439,16 @@ elif "Clientes" in page:
                     with ca:
                         if st.button("✅ Aplicar todas as baixas no Hubsoft",type="primary",use_container_width=True):
                             hub_novo=hub.copy()
+                            # Converte colunas para object antes de editar
+                            for _cx in [col_st_h, col_vp_h]:
+                                if _cx and _cx in hub_novo.columns:
+                                    hub_novo[_cx]=hub_novo[_cx].astype(object)
                             for _,m in mdf2.iterrows():
-                                idx=int(m["ih"])
-                                if idx in hub_novo.index:
-                                    if col_st_h:  hub_novo.at[idx,col_st_h] ="baixado_banco"
-                                    if col_vp_h:  hub_novo.at[idx,col_vp_h] =str(m["val_ofx"])
+                                try: idx=int(m["ih"])
+                                except: continue
+                                if idx not in hub_novo.index: continue
+                                if col_st_h: hub_novo.at[idx,col_st_h]="baixado_banco"
+                                if col_vp_h: hub_novo.at[idx,col_vp_h]=str(round(float(m["val_ofx"]),2))
                             st.session_state.hub_df=hub_novo
                             recalc()
                             st.success(f"✅ {len(mdf2)} cobranças baixadas como baixado_banco!")
