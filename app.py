@@ -299,6 +299,47 @@ div[data-testid="stSidebar"] .stRadio label span{color:#AAA !important}
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
+# CRITICIDADE DAS CATEGORIAS DE DESPESA
+# ══════════════════════════════════════════════════════════
+CRITICIDADE_CAT = {
+    "Energia Elétrica":             ("🔴 CRÍTICO", 0, "Risco CORTE energia"),
+    "Salários":                     ("🔴 CRÍTICO", 0, "Compromisso trabalhista"),
+    "Folha PJ":                     ("🔴 CRÍTICO", 0, "Compromisso trabalhista"),
+    "PGFN":                         ("🔴 CRÍTICO", 0, "Risco fiscal / multa"),
+    "Pagamento de Empréstimos":     ("🔴 CRÍTICO", 0, "Risco contratual"),
+    "Aluguel - Imóveis":            ("🟠 ALTA",    1, "Risco despejo"),
+    "Aluguel-Imóveis":              ("🟠 ALTA",    1, "Risco despejo"),
+    "Aluguel de Veículos":          ("🟠 ALTA",    1, "Operacional"),
+    "Serviços de Links/ IP`s":      ("🟠 ALTA",    1, "Core do negócio"),
+    "Compras de Mercadorias Para Redes": ("🟠 ALTA",1, "Operacional"),
+    "Serviços de Instalação Tomados":("🟠 ALTA",   1, "Operacional"),
+    "Reembolso":                    ("🟠 ALTA",    1, "Obrigação contratual"),
+    "Assistência Médica":           ("🟡 MÉDIA",   2, "Benefício equipe"),
+    "Advogados/Assessoria":         ("🟡 MÉDIA",   2, "Importância moderada"),
+    "Contabilidade":                ("🟡 MÉDIA",   2, "Regularidade fiscal"),
+    "Telefonia":                    ("🟡 MÉDIA",   2, "Operacional"),
+    "Água e Esgoto":                ("🟡 MÉDIA",   2, "Risco corte"),
+    "EPI":                          ("🟡 MÉDIA",   2, "Segurança"),
+    "Compras de Mercadorias para Instalação": ("🟡 MÉDIA", 2, "Operacional"),
+    "Sistema Operacional":          ("🟢 BAIXA",   3, "Pode adiar"),
+    "Sistemas":                     ("🟢 BAIXA",   3, "Pode adiar"),
+    "Material de Escritório":       ("🟢 BAIXA",   3, "Pode adiar"),
+    "Uniformes":                    ("🟢 BAIXA",   3, "Pode adiar"),
+    "Limpeza":                      ("🟢 BAIXA",   3, "Pode adiar"),
+    "NEGOCIAÇÃO":                   ("🟢 BAIXA",   3, "Pode adiar/renegociar"),
+    "Retiradas Sócios":             ("🟢 BAIXA",   3, "Pode adiar"),
+    "Manutenção de Equipamentos":   ("🟢 BAIXA",   3, "Pode adiar"),
+    "Consultoria":                  ("🟢 BAIXA",   3, "Pode adiar"),
+    "Outras Despesas":              ("🟢 BAIXA",   3, "Avaliar"),
+    "Móveis e Utensílios":          ("🟢 BAIXA",   3, "Pode adiar"),
+}
+
+def get_criticidade(categoria):
+    """Retorna (emoji_criticidade, prioridade_num, motivo) para uma categoria."""
+    return CRITICIDADE_CAT.get(str(categoria).strip(),
+                               ("🟡 MÉDIA", 2, "Avaliar prioridade"))
+
+# ══════════════════════════════════════════════════════════
 # EMPRESAS DO GRUPO — excluídas da conciliação e dos extratos
 # (transferências intercompany não são receitas de clientes)
 # ══════════════════════════════════════════════════════════
@@ -1206,6 +1247,7 @@ with st.sidebar:
         "📥  Importar Planilhas",
         "📋  Contas a Pagar",
         "🔄  Conciliação Bancária",
+        "📅  Agenda de Caixa",
         "📈  Previsão",
         "🤝  Negociação",
         "🤖  CFO IA · Maxwell",
@@ -2565,6 +2607,399 @@ elif "Conciliação" in page:
 
 
 # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
+# AGENDA DE CAIXA
+# ══════════════════════════════════════════════════════════
+elif "Agenda" in page:
+    st.markdown("## 📅 Agenda de Caixa")
+    st.markdown("Distribui pagamentos dia a dia conforme entradas previstas — mostra o que pagar, o que não cabe e o saldo a cada dia.")
+    show_src()
+
+    pag_df = st.session_state.pag_classif
+    hub_df = st.session_state.hub_df
+    s      = st.session_state.stats
+
+    if pag_df is None or pag_df.empty:
+        st.warning("📥 Importe a planilha **Contas a Pagar** em *Importar Planilhas* para gerar a agenda.")
+        st.stop()
+    if hub_df is None or hub_df.empty:
+        st.warning("📥 Importe a planilha **Hubsoft (faturamento)** em *Importar Planilhas* para projetar as entradas.")
+        st.stop()
+
+    hoje_ag = pd.Timestamp.now().normalize()
+    DIAS_SEMANA = {0:"Segunda",1:"Terça",2:"Quarta",3:"Quinta",4:"Sexta",5:"Sábado",6:"Domingo"}
+    STATUS_REC_AG = {"baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+                     "baixado_faturamento","baixado_cheque","pago","recebido"}
+
+    # ── Parâmetros ──
+    with st.container():
+        p1,p2,p3 = st.columns(3)
+        with p1:
+            caixa_inicial = st.number_input("💵 Caixa disponível hoje (R$)",
+                min_value=0.0, value=float(s.get("banco_saldo",0) or 0),
+                step=1000.0, format="%.2f")
+        with p2:
+            data_inicio = st.date_input("📅 Data início", value=hoje_ag.date())
+        with p3:
+            dias_horizonte = st.number_input("📆 Horizonte (dias)", min_value=7, max_value=60, value=15)
+    data_ini_ts = pd.Timestamp(data_inicio)
+    data_fim_ts = data_ini_ts + pd.Timedelta(days=int(dias_horizonte)-1)
+
+    # ── Prepara contas a pagar ──
+    col_forn2 = dcol(pag_df,"razao_social","razaosocial","fornecedor","nome")
+    col_cat2  = dcol(pag_df,"categoria","category","tipo")
+    col_ap2   = dcol(pag_df,"a_pagar","apagar","saldo","pendente")
+    col_venc2 = dcol(pag_df,"vencimento","data_vencimento","datavencimento")
+    col_vp2   = dcol(pag_df,"valor_pago","valorpago")
+    col_vliq2 = dcol(pag_df,"valor_liquido","valorliquido","liquido")
+
+    pag2 = pag_df.copy()
+    pag2["__forn"]  = pag2[col_forn2].fillna("").astype(str).str.strip() if col_forn2 else ""
+    pag2["__cat"]   = pag2[col_cat2].fillna("Outros").astype(str).str.strip() if col_cat2 else "Outros"
+    pag2["__apagar"]= pag2[col_ap2].apply(pv) if col_ap2 else (pag2[col_vliq2].apply(pv) if col_vliq2 else 0.0)
+    pag2["__pago"]  = pag2[col_vp2].apply(pv) if col_vp2 else 0.0
+    pag2["__venc"]  = pd.to_datetime(pag2[col_venc2], dayfirst=True, errors="coerce") if col_venc2 else pd.NaT
+
+    # Criticidade por categoria
+    pag2["__crit"]   = pag2["__cat"].apply(lambda c: get_criticidade(c)[0])
+    pag2["__prio"]   = pag2["__cat"].apply(lambda c: get_criticidade(c)[1])
+    pag2["__motivo"] = pag2["__cat"].apply(lambda c: get_criticidade(c)[2])
+    pag2["__status_venc"] = pag2["__venc"].apply(
+        lambda d: "ATRASADO" if pd.notna(d) and d < hoje_ag else "A VENCER")
+    pag2["__dias_atr"] = (hoje_ag - pag2["__venc"]).dt.days.fillna(0).clip(lower=0).astype(int)
+    pag2["__venc_str"] = pag2["__venc"].apply(lambda d: d.strftime("%d/%m") if pd.notna(d) else "—")
+
+    VAZIOS_AG = {"","—","-","nan","none","null","n/a"}
+    pendentes_ag = pag2[
+        (pag2["__apagar"] > 0) &
+        (~pag2["__forn"].str.lower().isin(VAZIOS_AG)) &
+        (~pag2["__cat"].str.lower().isin(VAZIOS_AG)) &
+        (pag2["__forn"].str.len() >= 2) &
+        (pag2["__venc"].isna() | (pag2["__venc"] <= data_fim_ts))
+    ].sort_values(["__prio","__venc","__apagar"], ascending=[True,True,False]).copy()
+
+    # ── Recebimentos esperados por dia (do Hubsoft) ──
+    col_val_h  = dcol(hub_df,"valor","value","mensalidade")
+    col_venc_h = dcol(hub_df,"data_vencimento","datavencimento","vencimento")
+    col_st_h   = dcol(hub_df,"status","situacao")
+    col_nome_h = dcol(hub_df,"nome","razaosocial","nome_razaosocial","cliente")
+    rec_por_dia = {}  # Timestamp → valor total esperado
+    n_rec_por_dia = {}
+    inad_por_dia = {}
+
+    if col_val_h and col_venc_h:
+        hub2 = hub_df.copy()
+        hub2["__v"]  = hub2[col_val_h].apply(pv)
+        hub2["__vc"] = pd.to_datetime(hub2[col_venc_h], dayfirst=True, errors="coerce")
+        hub2["__st"] = hub2[col_st_h].fillna("").astype(str).str.lower() if col_st_h else ""
+        hub_pend_ag  = hub2[
+            (~hub2["__st"].isin(STATUS_REC_AG)) &
+            (hub2["__v"] > 0) &
+            (hub2["__vc"].notna()) &
+            (hub2["__vc"] >= data_ini_ts) &
+            (hub2["__vc"] <= data_fim_ts)
+        ]
+        for _, r in hub_pend_ag.iterrows():
+            d = r["__vc"].normalize()
+            rec_por_dia[d]   = rec_por_dia.get(d, 0.0)   + r["__v"]
+            n_rec_por_dia[d] = n_rec_por_dia.get(d, 0)   + 1
+
+    # ── Algoritmo de agenda: distribui pagamentos dia a dia por criticidade ──
+    resultado_dias = []
+    nao_cobertos   = []
+    saldo          = float(caixa_inicial)
+    pagos_ids      = set()
+
+    data_atual = data_ini_ts
+    while data_atual <= data_fim_ts:
+        d_norm = data_atual.normalize()
+        entradas_dia = rec_por_dia.get(d_norm, 0.0)
+        n_entradas   = n_rec_por_dia.get(d_norm, 0)
+        saldo_inicio = saldo
+        saldo        += entradas_dia
+        fim_semana   = data_atual.weekday() >= 5
+
+        # Contas elegíveis hoje: atrasadas OU vencimento <= hoje
+        contas_hoje = pendentes_ag[
+            (~pendentes_ag.index.isin(pagos_ids)) &
+            (
+                pendentes_ag["__venc"].isna() |
+                (pendentes_ag["__venc"].dt.normalize() <= d_norm)
+            )
+        ].copy()
+
+        pagamentos_dia = []
+        for idx, conta in contas_hoje.iterrows():
+            val = float(conta["__apagar"])
+            if saldo >= val:
+                saldo -= val
+                pagos_ids.add(idx)
+                pagamentos_dia.append({
+                    "seq":     len(pagamentos_dia) + 1,
+                    "forn":    conta["__forn"],
+                    "cat":     conta["__cat"],
+                    "crit":    conta["__crit"],
+                    "prio":    conta["__prio"],
+                    "status":  conta["__status_venc"],
+                    "venc":    conta["__venc"],
+                    "venc_str":conta["__venc_str"],
+                    "dias_atr":int(conta["__dias_atr"]),
+                    "motivo":  conta["__motivo"],
+                    "val":     val,
+                    "saldo_apos": saldo,
+                })
+
+        total_pago_dia = sum(p["val"] for p in pagamentos_dia)
+        liquido = entradas_dia - total_pago_dia
+
+        # Status do dia
+        if fim_semana:
+            status_dia = "⏸️ FDS"
+        elif saldo < 0:
+            status_dia = "🚨 NEGATIVO"
+        elif saldo < 500:
+            status_dia = "🔴 CRÍTICO"
+        elif saldo < 2000:
+            status_dia = "🟡 OK"
+        elif saldo < 10000:
+            status_dia = "🟠 APERTADO"
+        else:
+            status_dia = "✅ Saudável"
+
+        resultado_dias.append({
+            "data":          data_atual,
+            "dia_semana":    DIAS_SEMANA[data_atual.weekday()],
+            "data_str":      data_atual.strftime("%d/%m/%Y"),
+            "saldo_inicio":  saldo_inicio,
+            "entradas":      entradas_dia,
+            "n_recebimentos":n_entradas,
+            "pagamentos":    total_pago_dia,
+            "n_contas":      len(pagamentos_dia),
+            "liquido":       liquido,
+            "saldo_fim":     saldo,
+            "status_dia":    status_dia,
+            "fim_semana":    fim_semana,
+            "itens":         pagamentos_dia,
+        })
+        data_atual += pd.Timedelta(days=1)
+
+    # Não cobertos
+    for idx, conta in pendentes_ag.iterrows():
+        if idx not in pagos_ids:
+            crit = conta["__crit"]
+            prio = conta["__prio"]
+            if prio == 0:   acao = "🚨 RENEGOCIAR PRAZO ou buscar caixa adicional"
+            elif prio == 1: acao = "📞 Conversar com fornecedor — pedir +7 dias"
+            elif prio == 2: acao = "📅 Aguardar próximo período"
+            else:           acao = "📅 Aguardar próximo período"
+            nao_cobertos.append({
+                "forn":    conta["__forn"],
+                "cat":     conta["__cat"],
+                "crit":    crit,
+                "prio":    prio,
+                "venc":    conta["__venc"],
+                "venc_str":conta["__venc_str"],
+                "status":  conta["__status_venc"],
+                "val":     float(conta["__apagar"]),
+                "motivo":  conta["__motivo"],
+                "acao":    acao,
+            })
+    nc_df = pd.DataFrame(sorted(nao_cobertos, key=lambda x: x["prio"])) if nao_cobertos else pd.DataFrame()
+
+    # ── Totais ──
+    total_pagar   = float(pendentes_ag["__apagar"].sum())
+    total_coberto = sum(d["pagamentos"] for d in resultado_dias)
+    total_nc      = float(nc_df["val"].sum()) if not nc_df.empty else 0.0
+    total_rec_esp = sum(rec_por_dia.values())
+    gap           = total_rec_esp + caixa_inicial - total_pagar
+    saldo_final   = resultado_dias[-1]["saldo_fim"] if resultado_dias else caixa_inicial
+    pct_coberto   = round(len(pagos_ids)/max(len(pendentes_ag),1)*100,1)
+    pct_nc        = round(len(nao_cobertos)/max(len(pendentes_ag),1)*100,1)
+
+    # ── DASHBOARD SUPERIOR ──
+    st.markdown("---")
+    st.markdown(f"**Base:** Faturado {brl(s.get('fat_total',0))} · Recebido {brl(s.get('fat_recebido',0))} · A Pagar {brl(s.get('pag_total',0))} · Caixa {brl(caixa_inicial)}")
+
+    k1,k2,k3,k4,k5 = st.columns(5)
+    k1.metric("💰 Faturado",           brl(s.get("fat_total",0)))
+    k2.metric("✅ Recebido",           brl(s.get("fat_recebido",0)))
+    k3.metric("📊 A Receber",          brl(s.get("fat_a_receber",0)))
+    k4.metric("💸 A Pagar",            brl(total_pagar))
+    k5.metric("💵 Caixa hoje",         brl(caixa_inicial))
+
+    st.markdown("---")
+    st.markdown(f"#### 📌 Análise dos próximos {dias_horizonte} dias")
+    a1,a2,a3 = st.columns(3)
+    a1.metric("💸 Compromissos do período",    brl(total_pagar),    f"{len(pendentes_ag)} contas")
+    a2.metric("📥 Entradas esperadas",         brl(total_rec_esp),  "Vencimentos 100%")
+    cor_gap = "inverse" if gap < 0 else "normal"
+    a3.metric("⚖️ GAP (Entradas − Compromissos)", brl(abs(gap)),
+              "DÉFICIT" if gap < 0 else "SUPERÁVIT", delta_color=cor_gap)
+
+    st.markdown("---")
+    r1,r2,r3,r4 = st.columns(4)
+    r1.metric("✅ Pagamentos cobertos",  brl(total_coberto), f"{len(pagos_ids)} contas ({pct_coberto}%)")
+    r2.metric("❌ Não cobertos",         brl(total_nc),      f"{len(nao_cobertos)} contas ({pct_nc}%)", delta_color="inverse")
+    r3.metric("💵 Saldo final",          brl(saldo_final))
+    dias_crit = sum(1 for d in resultado_dias if d["status_dia"] in ("🔴 CRÍTICO","🚨 NEGATIVO") and not d["fim_semana"])
+    r4.metric("🚨 Dias críticos",        str(dias_crit), "saldo < R$ 500", delta_color="inverse" if dias_crit>2 else "off")
+
+    # ── FLUXO DIÁRIO — mini tabela resumo ──
+    st.markdown("---")
+    st.markdown("#### 📅 Fluxo Diário Projetado")
+    fluxo_rows = []
+    for d in resultado_dias:
+        fluxo_rows.append({
+            "Data":        d["data_str"],
+            "Dia":         d["dia_semana"],
+            "Saldo Início":brl(d["saldo_inicio"]),
+            "Entradas":    brl(d["entradas"]),
+            "Pagamentos":  brl(d["pagamentos"]),
+            "Líquido":     brl(d["liquido"]),
+            "Saldo Fim":   brl(d["saldo_fim"]),
+            "Qtde Pgto":   d["n_contas"],
+            "Status":      d["status_dia"],
+        })
+    df_fluxo = pd.DataFrame(fluxo_rows)
+    st.dataframe(df_fluxo, use_container_width=True, hide_index=True, height=400)
+
+    # ── TABS ──
+    st.markdown("---")
+    tab_agenda, tab_lista, tab_nc, tab_cfo = st.tabs([
+        "📅 Agenda Detalhada",
+        f"📋 Lista Completa ({len(pendentes_ag)})",
+        f"⚠️ Não Cobertos ({len(nao_cobertos)}) — {brl(total_nc)}",
+        "🤖 Análise CFO",
+    ])
+
+    # ── TAB AGENDA DETALHADA ──
+    with tab_agenda:
+        for dia in resultado_dias:
+            dow      = dia["dia_semana"]
+            fds_txt  = "  ⏸️ FIM DE SEMANA" if dia["fim_semana"] else ""
+            cor_saldo = "#D93025" if dia["saldo_fim"] < 0 else "#22A85A" if dia["saldo_fim"] > 5000 else "#D97706"
+
+            st.markdown(
+                f"**📅 {dia['data_str']} — {dow.upper()}{fds_txt}**  ·  "
+                f"Saldo Fim: **{brl(dia['saldo_fim'])}**  ·  {dia['status_dia']}"
+            )
+            st.caption(
+                f"💰 Início: {brl(dia['saldo_inicio'])}  |  "
+                f"📥 Entradas: {brl(dia['entradas'])} ({dia['n_recebimentos']} rec.)  |  "
+                f"💸 Pagamentos: {brl(dia['pagamentos'])} ({dia['n_contas']} contas)  |  "
+                f"📊 Líquido: {brl(dia['liquido'])}"
+            )
+            if dia["itens"]:
+                df_itens = pd.DataFrame([{
+                    "#":           it["seq"],
+                    "Fornecedor":  it["forn"][:45],
+                    "Categoria":   it["cat"],
+                    "Criticidade": it["crit"],
+                    "Status":      it["status"],
+                    "Vencim.":     it["venc_str"],
+                    "Dias Atr.":   it["dias_atr"] if it["dias_atr"] > 0 else "—",
+                    "Motivo":      it["motivo"],
+                    "Valor (R$)":  brl(it["val"]),
+                    "Saldo Após":  brl(it["saldo_apos"]),
+                } for it in dia["itens"]])
+                st.dataframe(df_itens, use_container_width=True,
+                             hide_index=True, height=min(38*len(dia["itens"])+42, 320))
+            else:
+                if not dia["fim_semana"]:
+                    st.caption("— sem pagamentos programados —")
+            st.markdown("---")
+
+    # ── TAB LISTA COMPLETA ──
+    with tab_lista:
+        todos = []
+        for dia in resultado_dias:
+            for it in dia["itens"]:
+                todos.append({
+                    "Status Pgto":  "✅ PAGO",
+                    "Data Prog.":   dia["data_str"],
+                    "Dia":          dia["dia_semana"][:3],
+                    "Fornecedor":   it["forn"][:45],
+                    "Categoria":    it["cat"],
+                    "Criticidade":  it["crit"],
+                    "Status":       it["status"],
+                    "Vencim.":      it["venc_str"],
+                    "Dias Atr.":    it["dias_atr"] if it["dias_atr"] > 0 else "—",
+                    "Motivo":       it["motivo"],
+                    "Valor":        brl(it["val"]),
+                })
+        for nc in nao_cobertos:
+            todos.append({
+                "Status Pgto":  "❌ NÃO PAGO",
+                "Data Prog.":   "—",
+                "Dia":          "—",
+                "Fornecedor":   nc["forn"][:45],
+                "Categoria":    nc["cat"],
+                "Criticidade":  nc["crit"],
+                "Status":       nc["status"],
+                "Vencim.":      nc["venc_str"],
+                "Dias Atr.":    "—",
+                "Motivo":       nc["motivo"],
+                "Valor":        brl(nc["val"]),
+            })
+        df_lista_ag = pd.DataFrame(todos)
+        st.markdown(f"**Total: {len(todos)} contas — {brl(total_pagar)}  |  "
+                    f"Pagos: {len(pagos_ids)} ({brl(total_coberto)})  |  "
+                    f"Não Pagos: {len(nao_cobertos)} ({brl(total_nc)})**")
+        st.dataframe(df_lista_ag, use_container_width=True, hide_index=True, height=500)
+
+    # ── TAB NÃO COBERTOS ──
+    with tab_nc:
+        if not nc_df.empty:
+            st.error(f"**{len(nao_cobertos)} contas** — **{brl(total_nc)}** não cabem no caixa → precisam ser renegociadas.")
+            nc_crit = nc_df[nc_df["prio"]==0]["val"].sum() if "prio" in nc_df.columns else 0
+            nc_alta = nc_df[nc_df["prio"]==1]["val"].sum() if "prio" in nc_df.columns else 0
+            nc_med  = nc_df[nc_df["prio"]==2]["val"].sum() if "prio" in nc_df.columns else 0
+            nc_bx   = nc_df[nc_df["prio"]==3]["val"].sum() if "prio" in nc_df.columns else 0
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("🔴 CRÍTICO",  brl(nc_crit), f"{(nc_df['prio']==0).sum()} contas", delta_color="inverse")
+            c2.metric("🟠 ALTA",     brl(nc_alta), f"{(nc_df['prio']==1).sum()} contas", delta_color="inverse")
+            c3.metric("🟡 MÉDIA",    brl(nc_med),  f"{(nc_df['prio']==2).sum()} contas", delta_color="off")
+            c4.metric("🟢 BAIXA",    brl(nc_bx),   f"{(nc_df['prio']==3).sum()} contas", delta_color="off")
+            st.markdown("")
+            df_nc_show = pd.DataFrame({
+                "#":                range(1, len(nc_df)+1),
+                "Fornecedor":       nc_df["forn"].str[:45],
+                "Categoria":        nc_df["cat"],
+                "Vencimento":       nc_df["venc_str"],
+                "Status":           nc_df["status"],
+                "Criticidade":      nc_df["crit"],
+                "Valor":            nc_df["val"].apply(brl),
+                "Ação Recomendada": nc_df["acao"],
+            })
+            st.dataframe(df_nc_show, use_container_width=True, hide_index=True, height=500)
+        else:
+            st.success("✅ Todos os compromissos do período estão cobertos pelo caixa previsto!")
+
+    # ── TAB CFO ──
+    with tab_cfo:
+        if st.button("🤖 Gerar análise Maxwell — Agenda de Caixa", type="primary", use_container_width=True):
+            with st.spinner("Maxwell analisando fluxo de caixa..."):
+                dias_crit_list = [d for d in resultado_dias if d["status_dia"] in ("🔴 CRÍTICO","🚨 NEGATIVO") and not d["fim_semana"]]
+                nc_crit_list   = [n for n in nao_cobertos if n["prio"]==0]
+                prompt_ag = (
+                    f"AGENDA DE CAIXA GRUPO JET — {data_inicio.strftime('%d/%m')} a {data_fim_ts.strftime('%d/%m/%Y')}\\n"
+                    f"Caixa inicial: {brl(caixa_inicial)} | Faturado: {brl(s.get('fat_total',0))} | "
+                    f"Recebido: {brl(s.get('fat_recebido',0))} | A Receber: {brl(s.get('fat_a_receber',0))}\\n"
+                    f"Compromissos período: {brl(total_pagar)} ({len(pendentes_ag)} contas) | "
+                    f"Entradas esperadas: {brl(total_rec_esp)} | GAP: {brl(abs(gap))} ({'DÉFICIT' if gap<0 else 'SUPERÁVIT'})\\n"
+                    f"Cobertos: {brl(total_coberto)} ({len(pagos_ids)} contas - {pct_coberto}%) | "
+                    f"Não cobertos: {brl(total_nc)} ({len(nao_cobertos)} contas - {pct_nc}%) | Saldo final: {brl(saldo_final)}\\n"
+                    f"Dias críticos (saldo<R$500): {dias_crit}\\n"
+                    f"CRÍTICOS não cobertos: {', '.join(n['forn'][:30] for n in nc_crit_list[:5]) or 'nenhum'}\\n"
+                    f"Ações obrigatórias:\\n"
+                    f"1. RENEGOCIAR {sum(1 for n in nao_cobertos if n['prio']<=1)} contas CRÍTICAS/ALTA\\n"
+                    f"2. COBRAR ativamente os inadimplentes para cobrir o gap\\n"
+                    "Gere diagnóstico completo com ações prioritárias para os próximos 15 dias."
+                )
+                resp = cfo(prompt_ag, max_tokens=1200)
+            st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
+
+
 # PREVISÃO
 # ══════════════════════════════════════════════════════════
 elif "Previsão" in page:
