@@ -718,30 +718,36 @@ def agendar_inteligente(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
 # ══════════════════════════════════════════════════════════════════════
 def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
                  caixa_inicial: float, data_ini: pd.Timestamp,
-                 dias_horizonte: int) -> dict:
+                 dias_horizonte: int,
+                 rec_pago_total: float = 0.0) -> dict:
     """
+    rec_pago_total: total já recebido (do extrato OFX). Escalona as projeções.
     Algoritmo principal: distribui pagamentos dia a dia conforme entradas.
     Retorna dict com resultado_dias, nao_cobertos, totais.
     """
     data_fim = data_ini + pd.Timedelta(days=dias_horizonte - 1)
     hoje     = pd.Timestamp.now().normalize()
 
-    # Recebimentos por dia
+    # ── Recebimentos por dia ─────────────────────────────────────────
+    # Inclui TODOS os recebíveis (atrasados + período + além do horizonte)
+    # escalados pelo fator pendente = (1 - já_recebido / total_faturado)
+    # Isso corrige a assimetria: pend tem todos os atrasos, rec também
     rec_por_dia = {}
     n_rec_dia   = {}
-    if not rec_df.empty:
-        rec_periodo = rec_df[
-            (rec_df["__venc"] >= data_ini) &
-            (rec_df["__venc"] <= data_fim)
-        ]
+    if not rec_df.empty and "__val" in rec_df.columns and "__venc" in rec_df.columns:
+        faturado_total  = float(rec_df["__val"].sum())
+        # Fator: proporção ainda a receber (descontando OFX já recebido)
+        fator_pendente  = max(1.0 - rec_pago_total / faturado_total, 0.0)                           if faturado_total > 0 else 1.0
         for _, r in rec_df.iterrows():
-            if not pd.notna(r["__venc"]): continue
+            if not pd.notna(r["__venc"]) or r["__val"] <= 0: continue
             d = r["__venc"].normalize()
-            # Só conta receivables FUTUROS no período (>= data_ini)
-            # Os vencidos já estão no saldo atual ou em rec_a_receber
-            if d < data_ini or d > data_fim: continue
-            rec_por_dia[d] = rec_por_dia.get(d, 0.0) + r["__val"]
-            n_rec_dia[d]   = n_rec_dia.get(d, 0)    + 1
+            # Atrasados → primeiro dia | Além do horizonte → último dia
+            if   d < data_ini: d_ef = data_ini
+            elif d > data_fim: d_ef = data_fim
+            else:              d_ef = d
+            val_aj = r["__val"] * fator_pendente
+            rec_por_dia[d_ef] = rec_por_dia.get(d_ef, 0.0) + val_aj
+            n_rec_dia[d_ef]   = n_rec_dia.get(d_ef,  0)    + 1
 
     # Pendentes: atrasados OU vencem até data_fim
     pend = pag_df[
@@ -973,7 +979,8 @@ data_ini_ts = pd.Timestamp(data_ini_input)
 
 if not pag_df.empty:
     with st.spinner("Calculando agenda de caixa..."):
-        agenda = gerar_agenda(pag_df, rec_df, caixa_ini, data_ini_ts, int(dias_hor))
+        agenda = gerar_agenda(pag_df, rec_df, caixa_ini, data_ini_ts, int(dias_hor),
+                            rec_pago_total=rec_pago)
 
 # ══════════════════════════════════════════════════════════════════════
 # TELA INICIAL — sem dados
