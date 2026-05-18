@@ -160,7 +160,7 @@ for k, v in {
     "chat_history": [], "api_key": "",
     "data_src": "Sem dados importados",
     "last_update": None,
-    "hub_col_map": {}, "col_expanded": False, "hub_diag": {}, "pag_diag": {},
+    "hub_col_map": {}, "col_expanded": False, "hub_diag": {}, "pag_diag": {}, "ofx_df": None, "concil_result": None,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -303,6 +303,149 @@ def read_file(f):
     except Exception as e:
         st.error(f"Erro ao ler {f.name}: {e}")
     return None
+
+
+# ══════════════════════════════════════════════════════════
+# CONCILIAÇÃO BANCÁRIA — cruza extrato OFX com A Receber
+# ══════════════════════════════════════════════════════════
+def run_conciliacao(ofx_df, hub_df):
+    """
+    Cruza transações do extrato bancário (OFX) com cobranças a receber (Hubsoft).
+    Retorna DataFrame com os matches encontrados e score de confiança.
+    """
+    import unicodedata, re as _re
+
+    if ofx_df is None or ofx_df.empty: return pd.DataFrame()
+    if hub_df is None or hub_df.empty:  return pd.DataFrame()
+
+    STATUS_REC = {
+        "baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+        "baixado_faturamento","baixado_cheque","baixado_ted","baixado_doc",
+        "baixado_cartao","baixado_dinheiro","baixado","pago","recebido","quitado"
+    }
+
+    # Apenas cobranças ainda pendentes
+    col_nome  = dcol(hub_df,"nome","razaosocial","nome_razaosocial","cliente","name")
+    col_val   = dcol(hub_df,"valor","value","amount","mensalidade")
+    col_venc  = dcol(hub_df,"data_vencimento","datavencimento","vencimento","duedate")
+    col_st    = dcol(hub_df,"status","situacao","estado")
+
+    if not col_nome or not col_val: return pd.DataFrame()
+
+    hub = hub_df.copy()
+    hub["_nome_c"] = hub[col_nome].fillna("").astype(str).str.strip()
+    hub["_val_c"]  = hub[col_val].apply(pv)
+    hub["_venc_c"] = pd.to_datetime(hub[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.NaT
+    hub["_st_c"]   = hub[col_st].fillna("").astype(str).str.lower().str.strip() if col_st else ""
+
+    hub_pend = hub[
+        (~hub["_st_c"].isin(STATUS_REC)) &
+        (hub["_nome_c"].str.len() >= 2) &
+        (hub["_val_c"] > 0)
+    ].copy()
+
+    if hub_pend.empty: return pd.DataFrame()
+
+    # Apenas créditos do extrato (entradas = valor > 0)
+    ofx_cred = ofx_df[ofx_df["valor"] > 0].copy() if "valor" in ofx_df.columns else pd.DataFrame()
+    if ofx_cred.empty: return pd.DataFrame()
+
+    def _norm(s):
+        s = unicodedata.normalize("NFKD", str(s).upper())
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        for t in ["LTDA","S.A","S/A","ME","EIRELI","SA","SS","EPP","IND","COM",
+                  "SERV","DE","DA","DO","DOS","DAS","E","EM","OU","NA","NO"]:
+            s = _re.sub(rf'\b{t}\b', '', s)
+        return _re.sub(r'\s+', ' ', s).strip()
+
+    def _palavras(s):
+        return {w for w in _norm(s).split() if len(w) > 3}
+
+    # Gera todos os candidatos
+    candidatos = []
+    for io, ofx_row in ofx_cred.iterrows():
+        vo = ofx_row["valor"]
+        do = ofx_row.get("data", pd.NaT)
+        mo = _norm(str(ofx_row.get("memo", "")))
+
+        for ih, hub_row in hub_pend.iterrows():
+            vh = hub_row["_val_c"]
+            if vh <= 0: continue
+
+            # Match de valor (1.5% tolerância)
+            diff_pct = abs(vo - vh) / max(vh, 0.01)
+            if diff_pct > 0.015: continue
+
+            # Match de data (±20 dias)
+            dd = 999
+            if pd.notna(hub_row["_venc_c"]) and pd.notna(do):
+                dd = abs((do - hub_row["_venc_c"]).days)
+            if dd > 20: continue
+
+            # Match de nome
+            pw = _palavras(hub_row["_nome_c"])
+            nm = any(p in mo for p in pw) if pw else False
+
+            score = 50  # base: valor igual
+            score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 0)
+            score += 35 if nm else 0
+
+            candidatos.append({
+                "io": io, "ih": ih, "score": score, "dd": dd, "nm": nm,
+                "hub_idx":   ih,
+                "nome_hub":  hub_row["_nome_c"],
+                "val_hub":   vh,
+                "venc_hub":  str(hub_row.get(col_venc, ""))[:10] if col_venc else "—",
+                "val_ofx":   vo,
+                "data_ofx":  do.strftime("%d/%m/%Y") if pd.notna(do) else "—",
+                "memo_ofx":  str(ofx_row.get("memo", ""))[:60],
+                "ofx_id":    str(ofx_row.get("ofx_id", io)),
+            })
+
+    if not candidatos:
+        return pd.DataFrame()
+
+    cands = pd.DataFrame(candidatos).sort_values("score", ascending=False)
+
+    # 1-para-1: cada OFX e cada cobrança usada só uma vez
+    used_ofx = set(); used_hub = set(); final = []
+    for _, c in cands.iterrows():
+        if c["io"] not in used_ofx and c["ih"] not in used_hub:
+            used_ofx.add(c["io"]); used_hub.add(c["ih"])
+            final.append(c)
+
+    if not final:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(final).drop(columns=["io"], errors="ignore")
+    result["confianca"] = result["score"].apply(
+        lambda s: "🟢 Alta" if s >= 85 else "🟡 Média" if s >= 65 else "🟠 Baixa"
+    )
+    result["val_hub_fmt"] = result["val_hub"].apply(brl)
+    result["val_ofx_fmt"] = result["val_ofx"].apply(brl)
+    return result.sort_values("score", ascending=False).reset_index(drop=True)
+
+
+def aplicar_baixas(hub_df, matches_selecionados):
+    """
+    Aplica o status 'baixado_banco' nas cobranças selecionadas.
+    Retorna hub_df atualizado.
+    """
+    if hub_df is None or matches_selecionados.empty:
+        return hub_df
+
+    col_st    = dcol(hub_df,"status","situacao","estado")
+    col_vpago = dcol(hub_df,"valor_pago","valorpago","paidamount")
+    col_dpag  = dcol(hub_df,"data_pagamento","datapagamento","pagamento")
+
+    hub = hub_df.copy()
+    for _, m in matches_selecionados.iterrows():
+        idx = m["hub_idx"]
+        if idx in hub.index:
+            if col_st:    hub.at[idx, col_st]    = "baixado_banco"
+            if col_vpago: hub.at[idx, col_vpago] = str(m["val_ofx"])
+            if col_dpag:  hub.at[idx, col_dpag]  = m["data_ofx"]
+    return hub
 
 # ══════════════════════════════════════════════════════════
 # PROCESSAMENTO CENTRAL — chamado ao importar qualquer dado
@@ -743,6 +886,7 @@ with st.sidebar:
         "🏦  Extratos Bancários",
         "📥  Importar Planilhas",
         "📋  Contas a Pagar",
+        "🔄  Conciliação Bancária",
         "📈  Previsão",
         "🤝  Negociação",
         "🤖  CFO IA · Maxwell",
@@ -1095,6 +1239,9 @@ elif "Extratos" in page:
                         if trans_dest:
                             j["transacoes_destaque"] = trans_dest
                         st.session_state.ext_result = j
+                        # Salva dados OFX estruturados para conciliação
+                        if ofx_data:
+                            st.session_state.ofx_df = ofx_data["df"]
                         st.rerun()
                     except json.JSONDecodeError:
                         # Fallback: monta resultado direto dos dados OFX sem depender de JSON da IA
@@ -1526,6 +1673,156 @@ elif "Contas" in page:
         with st.spinner("Analisando..."):
             resp = cfo("Com os dados reais das contas a pagar e faturamento, gere um plano de pagamento prioritizado para 30 dias considerando o fluxo de caixa disponível.")
         st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════
+# CONCILIAÇÃO BANCÁRIA
+# ══════════════════════════════════════════════════════════
+elif "Conciliação" in page:
+    st.markdown("## 🔄 Conciliação Bancária")
+    st.markdown("**Cruza o extrato bancário com as cobranças a receber e baixa automaticamente os pagamentos identificados.**")
+    show_src()
+
+    hub   = st.session_state.hub_df
+    ofx   = st.session_state.ofx_df
+    s_all = st.session_state.stats
+
+    # ── Status dos dados necessários ──
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        ok_hub = hub is not None and not hub.empty
+        st.markdown(f"""
+        <div style='background:{"#E5F7ED" if ok_hub else "#FDECEB"};border-radius:8px;
+            padding:12px 14px;text-align:center'>
+            <div style='font-size:20px'>{"✅" if ok_hub else "❌"}</div>
+            <div style='font-size:12px;font-weight:600;color:#141414'>Planilha Hubsoft</div>
+            <div style='font-size:11px;color:#6E6E6E'>
+                {"1857 cobranças carregadas" if ok_hub else "Importe em Importar Planilhas"}</div>
+        </div>""", unsafe_allow_html=True)
+    with col2:
+        ok_ofx = ofx is not None and not ofx.empty
+        st.markdown(f"""
+        <div style='background:{"#E5F7ED" if ok_ofx else "#FDECEB"};border-radius:8px;
+            padding:12px 14px;text-align:center'>
+            <div style='font-size:20px'>{"✅" if ok_ofx else "❌"}</div>
+            <div style='font-size:12px;font-weight:600;color:#141414'>Extrato Bancário (OFX)</div>
+            <div style='font-size:11px;color:#6E6E6E'>
+                {f"{len(ofx)} transações carregadas" if ok_ofx else "Analise em Extratos Bancários"}</div>
+        </div>""", unsafe_allow_html=True)
+    with col3:
+        result = st.session_state.get("concil_result")
+        n_match = len(result) if result is not None and not result.empty else 0
+        st.markdown(f"""
+        <div style='background:{"#E6F2FB" if n_match>0 else "#F6F4F1"};border-radius:8px;
+            padding:12px 14px;text-align:center'>
+            <div style='font-size:20px'>{"🔄" if n_match>0 else "○"}</div>
+            <div style='font-size:12px;font-weight:600;color:#141414'>Matches encontrados</div>
+            <div style='font-size:11px;color:#6E6E6E'>{n_match} pagamentos identificados</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not ok_hub or not ok_ofx:
+        st.warning("⚠️ Para conciliar é necessário: **1)** Importar a planilha Hubsoft em *Importar Planilhas* e **2)** Analisar um extrato OFX em *Extratos Bancários*.")
+        st.stop()
+
+    # ── Botão de conciliação ──
+    col_btn, col_info = st.columns([1, 2])
+    with col_btn:
+        if st.button("🔄 Executar Conciliação", type="primary", use_container_width=True):
+            with st.spinner("Cruzando extrato com cobranças..."):
+                result = run_conciliacao(ofx, hub)
+                st.session_state.concil_result = result
+                st.rerun()
+
+    result = st.session_state.get("concil_result")
+
+    if result is not None and not result.empty:
+        # ── KPIs ──
+        alta   = result[result["confianca"]=="🟢 Alta"]
+        media  = result[result["confianca"]=="🟡 Média"]
+        baixa  = result[result["confianca"]=="🟠 Baixa"]
+
+        k1,k2,k3,k4 = st.columns(4)
+        k1.metric("Total matches",     len(result))
+        k2.metric("🟢 Alta confiança", len(alta),   f"{brl(alta['val_hub'].sum())}")
+        k3.metric("🟡 Média conf.",    len(media),  f"{brl(media['val_hub'].sum())}")
+        k4.metric("💰 Total a baixar", "",           brl(result['val_hub'].sum()))
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Filtros ──
+        f1, f2 = st.columns([2,1])
+        with f1:
+            busca_c = st.text_input("🔍 Filtrar por nome...", key="c_busca")
+        with f2:
+            filt_conf = st.selectbox("Confiança:", ["Todas","🟢 Alta","🟡 Média","🟠 Baixa"], key="c_conf")
+
+        result_show = result.copy()
+        if busca_c:
+            result_show = result_show[result_show["nome_hub"].str.lower().str.contains(busca_c.lower())]
+        if filt_conf != "Todas":
+            result_show = result_show[result_show["confianca"]==filt_conf]
+
+        # ── Tabela de matches com seleção ──
+        st.markdown(f"**{len(result_show)} matches — selecione os que deseja baixar:**")
+
+        # Colunas para exibição
+        disp = result_show[["confianca","nome_hub","val_hub_fmt","venc_hub","val_ofx_fmt","data_ofx","memo_ofx","dd"]].copy()
+        disp.columns = ["Confiança","Cliente","Valor Cobrado","Vencimento","Valor Pago","Data Pgto","Memo Extrato","Dias Dif."]
+
+        st.dataframe(disp, use_container_width=True, height=360, hide_index=True)
+
+        st.markdown("---")
+
+        # ── Opções de baixa ──
+        st.markdown("**Aplicar baixas:**")
+        c_a, c_b, c_c = st.columns(3)
+
+        with c_a:
+            if st.button("✅ Baixar TODOS os matches", type="primary", use_container_width=True):
+                with st.spinner("Aplicando baixas..."):
+                    hub_novo = aplicar_baixas(hub, result)
+                    st.session_state.hub_df = hub_novo
+                    recalc()
+                    st.session_state.concil_result = None
+                st.success(f"✅ {len(result)} cobranças baixadas como 'baixado_banco'! Dados atualizados.")
+                st.rerun()
+
+        with c_b:
+            if st.button("🟢 Baixar só Alta confiança", use_container_width=True):
+                with st.spinner("Aplicando baixas..."):
+                    hub_novo = aplicar_baixas(hub, alta)
+                    st.session_state.hub_df = hub_novo
+                    recalc()
+                    st.session_state.concil_result = run_conciliacao(ofx, hub_novo)
+                st.success(f"✅ {len(alta)} cobranças de alta confiança baixadas!")
+                st.rerun()
+
+        with c_c:
+            if st.button("🔄 Refazer conciliação", use_container_width=True):
+                with st.spinner("Recalculando..."):
+                    result = run_conciliacao(ofx, st.session_state.hub_df)
+                    st.session_state.concil_result = result
+                st.rerun()
+
+        # ── Insight CFO ──
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🤖 Análise CFO da conciliação", use_container_width=True):
+            with st.spinner("Maxwell analisando..."):
+                resp = cfo(
+                    f"Conciliação bancária: {len(result)} pagamentos identificados no extrato "
+                    f"totalizando {brl(result['val_hub'].sum())}. "
+                    f"Alta confiança: {len(alta)} ({brl(alta['val_hub'].sum())}), "
+                    f"Média: {len(media)} ({brl(media['val_hub'].sum())}), "
+                    f"Baixa: {len(baixa)} ({brl(baixa['val_hub'].sum())}). "
+                    "Analise a taxa de recebimento, recomende ação para os não conciliados e "
+                    "avalie o impacto no fluxo de caixa."
+                )
+            st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
+
+    elif result is not None and result.empty:
+        st.info("Nenhum match encontrado. Verifique se o extrato e a planilha correspondem ao mesmo período.")
 
 
 # ══════════════════════════════════════════════════════════
