@@ -249,11 +249,11 @@ class HubsoftAPI:
     # ── COBRANÇAS ─────────────────────────────────────────────────────
     # Endpoints alternativos de cobranças/faturas (tenta em ordem)
     COBRANCA_ENDPOINTS = [
+        "/api/v1/integracao/financeiro/fatura",      # ← funciona neste servidor
         "/api/v1/integracao/financeiro/cobranca",
-        "/api/v1/integracao/financeiro/fatura",
         "/api/v1/integracao/cliente/financeiro",
-        "/financeiro/cobranca",
         "/financeiro/fatura",
+        "/financeiro/cobranca",
     ]
 
     def get_cobrancas(self, data_ini, data_fim,
@@ -375,15 +375,18 @@ class HubsoftAPI:
         d_ini    = f"{mes}-01"
         d_fim    = f"{mes}-{ult_dia:02d}"
 
-        # Auto-descobre endpoints antes de importar
-        print(f"🔍 Descobrindo endpoints Hubsoft em {self._base_ativo}...")
-        eps = self.descobrir_endpoints()
-        for ep, st in eps.items():
-            icon = "✅" if st == 200 else f"❌{st}"
-            print(f"  {icon} {ep}")
-
+        # Busca TODAS as cobranças do mês (pagas + abertas + atrasadas)
+        # Sem filtro de status para pegar tudo
         cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+
+        # Busca também recebimentos do mês por data de pagamento
+        # (captura pagamentos de cobranças de meses anteriores)
         cob_rec = self.get_cobrancas(d_ini, d_fim, tipo_data="pagamento", pago=True)
+
+        # Se cob_mes retornou vazio, tenta sem filtro de data de vencimento
+        # usando data de lançamento
+        if cob_mes.empty:
+            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="lancamento")
         try:    clientes = self.get_clientes("ativo")
         except: clientes = pd.DataFrame()
 
