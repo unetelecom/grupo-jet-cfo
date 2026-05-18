@@ -160,7 +160,7 @@ for k, v in {
     "chat_history": [], "api_key": "",
     "data_src": "Sem dados importados",
     "last_update": None,
-    "hub_col_map": {}, "col_expanded": False,
+    "hub_col_map": {}, "col_expanded": False, "hub_diag": {},
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -180,12 +180,71 @@ def brl(v):
         return "R$ —"
 
 def pv(v):
-    if v is None or str(v).strip() == "": return 0.0
-    try: return float(v)
+    """Parse qualquer formato monetário brasileiro ou internacional."""
+    if v is None: return 0.0
+    if isinstance(v, (int, float)): return float(v)
+    s = str(v).strip()
+    if s in ("", "-", "nan", "None", "null", "N/A", "0,0"): return 0.0
+    s = s.replace("R$","").replace("$","").replace(" ","").strip()
+    has_dot   = "." in s
+    has_comma = "," in s
+    try:
+        if has_dot and has_comma:
+            # Qual vem por último é o separador decimal
+            if s.rfind(".") > s.rfind(","):
+                s = s.replace(",","")           # US: 1,290.50
+            else:
+                s = s.replace(".","").replace(",",".")  # BR: 1.290,50
+        elif has_comma and not has_dot:
+            parts = s.split(",")
+            if len(parts) == 2 and len(parts[1]) <= 2:
+                s = s.replace(",",".")          # BR decimal: 89,90
+            else:
+                s = s.replace(",","")           # US milhar: 1,290
+        elif has_dot and not has_comma:
+            parts = s.split(".")
+            if not (len(parts) == 2 and len(parts[1]) <= 2):
+                s = s.replace(".","")           # BR milhar sem centavos: 1.290.500
+        return float(s)
     except:
-        s = str(v).replace("R$","").replace(" ","").replace(".","").replace(",",".")
-        try: return float(s)
-        except: return 0.0
+        return 0.0
+
+
+def find_money_col(df, priority_terms, min_avg=10.0, max_avg=50000.0):
+    """
+    Detecta a coluna monetária correta analisando os VALORES reais.
+    1. Prioriza colunas cujo nome corresponde aos termos E cujos valores
+       estão no intervalo realista (min_avg a max_avg).
+    2. Fallback: qualquer coluna numérica no intervalo, excluindo IDs/CPF/CNPJ.
+    """
+    SKIP = {"id","codigo","code","cnpj","cpf","telefone","fone","phone","cep",
+            "numero","number","num","contrato","contract","seq","protocolo"}
+    norm = lambda s: str(s).lower().replace(" ","").replace("_","").replace("-","").replace("/","")
+
+    def is_id_col(col):
+        nc = norm(col)
+        return any(sk in nc for sk in SKIP)
+
+    # Analisa todos os candidatos numéricos
+    candidates = []
+    for col in df.columns:
+        if is_id_col(col): continue
+        vals = df[col].apply(pv)
+        pos  = vals[vals > 0]
+        if len(pos) == 0: continue
+        avg = pos.mean()
+        name_score = sum(1 for t in priority_terms if norm(t) in norm(col) or norm(col) in norm(t))
+        candidates.append((col, avg, name_score))
+
+    # Ordena: maior nome_score primeiro, depois mais próximo do centro do range
+    mid = (min_avg + max_avg) / 2
+    candidates.sort(key=lambda x: (-x[2], abs(x[1] - mid)))
+
+    # Retorna o primeiro dentro do range realista
+    for col, avg, score in candidates:
+        if min_avg <= avg <= max_avg:
+            return col
+    return None
 
 def fmtd(v):
     if v is None or str(v).strip() == "": return "—"
@@ -196,11 +255,22 @@ def fmtd(v):
     except: return str(v)
 
 def dcol(df, *terms):
+    """Detecta coluna por nome. Prioridade: exato > term-em-col > col-em-term(mín 60%)."""
     if df is None or df.empty: return None
     n = lambda s: str(s).lower().replace(" ","").replace("_","").replace("-","").replace("/","")
-    for col in df.columns:
-        for t in terms:
-            if n(t) in n(col) or n(col) in n(t): return col
+    cols = [(c, n(c)) for c in df.columns]
+    for t in terms:
+        nt = n(t)
+        # 1. Match exato
+        for col, nc in cols:
+            if nc == nt: return col
+        # 2. Termo é substring do nome da coluna (ex: "valor" em "valorpago")
+        for col, nc in cols:
+            if nt in nc: return col
+        # 3. Nome da coluna é substring do termo — só se col ≥ 60% do termo
+        #    (evita "valor" falso-positivo para busca de "valor_pago")
+        for col, nc in cols:
+            if nc in nt and len(nc) >= max(4, int(len(nt) * 0.65)): return col
     return None
 
 def read_file(f):
@@ -240,171 +310,164 @@ def recalc():
     S    = STAT_ZERO.copy()
     srcs = []
 
-    # ── HUBSOFT — 4 categorias financeiras ──
+    # ── HUBSOFT — leitura inteligente com 4 categorias ──
     if hub is not None and not hub.empty:
-        srcs.append(f"Hubsoft ({len(hub)} reg.)")
         hub = hub.copy()
 
-        # ── Usa mapa manual se definido pelo usuário, senão detecta automaticamente ──
-        col_map = _st.session_state.get("hub_col_map", {})
+        # ═══════════════════════════════════════════════════
+        # PASSO 1 — Detecta colunas pelos nomes (Hubsoft BR)
+        # ═══════════════════════════════════════════════════
+        norm_c = lambda s: str(s).lower().replace(" ","").replace("_","").replace("-","").replace("/","")
 
-        def _col(manual_key, *auto_terms):
-            """Retorna coluna manual se definida, senão detecta automaticamente."""
-            manual = col_map.get(manual_key)
-            if manual and manual in hub.columns:
-                return manual
-            return dcol(hub, *auto_terms)
+        col_nome   = dcol(hub,"nome","razaosocial","nome_razaosocial","cliente","name","nomecliente")
+        col_status = dcol(hub,"status","situacao","estado","situation","situacao","situacaocliente")
+        col_valor  = dcol(hub,"valor","value","amount","mensalidade","valorcobranca","valormensal")
+        col_vpago  = dcol(hub,"valor_pago","valor_pago","valorpago","vlpago","paidamount","amountpaid","vlrecebido","valorrecebido")
+        col_datapag= dcol(hub,"data_pagamento","datapagamento","dtpagamento","datapag","paid","pagamento","datapago")
+        col_venc   = dcol(hub,"data_vencimento","datavencimento","vencimento","vencto","duedate","datavenc","venc")
+        col_dias   = dcol(hub,"dias_atraso","diasatraso","diasdeatraso","atraso","dias","days","overdue")
+        col_serv   = dcol(hub,"servico","service","plano","produto","plan","descricaoservico")
+        col_id     = dcol(hub,"id_cobranca","idcobranca","id","codigo","code","numero")
 
-        sc   = _col("status",  "status","situacao","estado","situation","situação")
-        nc   = _col("valor",   "mensalidade","valor","value","amount","mensal","monthly","valormensal","valorplano","plano")
-        dc2  = _col("dias",    "diasatraso","dias","atraso","days","overdue","diasdeatraso")
-        vc   = _col("atraso",  "valoraberto","aberto","debito","saldo","balance","valordevido","devido","valoratraso")
-        pc   = _col("pago",    "datapagamento","pagamento","pago","datapag","paid","payment","dtpagamento")
-        vpc  = dcol(hub,       "valorpago","valorrecebido","recebido","amountpaid","paidamount")
-        venc = _col("venc",    "vencimento","datavencimento","vencto","duedate","datavenc","venc","dtavencimento")
-        vpc2 = dcol(hub,       "valorafaturado","faturado","invoiced","valorcobranca","cobranca","valorliquido")
+        # ═══════════════════════════════════════════════════
+        # PASSO 2 — Remove linhas de total/resumo do Hubsoft
+        # (linhas sem nome de cliente com valores grandes)
+        # ═══════════════════════════════════════════════════
+        if col_nome:
+            nomes = hub[col_nome].fillna("").astype(str).str.strip()
+            # Filtra fora linhas com nome vazio ou muito curto
+            hub = hub[nomes.str.len() >= 3].copy()
 
-        # ── Diagnóstico: evita somar coluna com valores absurdos ──
-        # Se nc detectado mas média/cliente > R$ 100.000, provavelmente coluna errada
-        if nc:
-            sample_vals = hub[nc].apply(pv).dropna()
-            avg_val = sample_vals.mean() if len(sample_vals) > 0 else 0
-            # Se média > 100k ou < 0.01, ignora coluna e usa None
-            if avg_val > 100000 or (avg_val < 0.01 and avg_val > 0):
-                nc = None  # força usuário a selecionar manualmente
+        srcs.append(f"Hubsoft ({len(hub)} cobranças)")
 
-        # ── Normaliza status ──
-        if sc:
-            hub["_st"] = hub[sc].astype(str).str.lower().str.strip()
-        else:
-            hub["_st"] = "ativo"
+        # ═══════════════════════════════════════════════════
+        # PASSO 3 — Converte valores monetários
+        # ═══════════════════════════════════════════════════
+        hub["_val"]   = hub[col_valor].apply(pv) if col_valor else 0.0
+        hub["_vpago"] = hub[col_vpago].apply(pv) if col_vpago else 0.0
+        hub["_venc"]  = pd.to_datetime(
+            hub[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.NaT
+        hub["_st"]    = (hub[col_status].fillna("").astype(str).str.lower().str.strip()
+                         if col_status else "aguardando")
+        hub["_nome"]  = (hub[col_nome].fillna("").astype(str).str.strip()
+                         if col_nome else "")
 
-        is_inad = hub["_st"].str.contains("inad|delinq|atraso|inadim", na=False)
-        is_susp = hub["_st"].str.contains("suspen|bloq|suspens", na=False)
-        is_canc = hub["_st"].str.contains("cancel|inativ", na=False)
-        is_ativ = ~(is_inad | is_susp | is_canc)
+        # ═══════════════════════════════════════════════════
+        # PASSO 4 — Classifica em 4 categorias usando:
+        #   a) status do Hubsoft
+        #   b) presença de data/valor de pagamento
+        #   c) data vencimento vs hoje (para "aguardando" vencido)
+        # ═══════════════════════════════════════════════════
 
-        S["n_clientes"]   = len(hub)
-        S["n_ativos"]     = int(is_ativ.sum())
-        S["n_inad"]       = int(is_inad.sum())
-        S["n_suspensos"]  = int(is_susp.sum())
-        S["n_cancelados"] = int(is_canc.sum())
+        # Status que indicam pagamento confirmado no Hubsoft
+        STATUS_RECEBIDO = {
+            "baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+            "baixado_faturamento","baixado_cheque","baixado_ted","baixado_doc",
+            "baixado_cartao","baixado_dinheiro","baixado_outros","baixado",
+            "pago","recebido","quitado","liquidado","paid","settled",
+        }
+        # Status que indicam definitivamente vencido/inadimplente
+        STATUS_ATRASADO = {
+            "vencido","inadimplente","atrasado","em_atraso","overdue","delinquent",
+        }
+        # Status neutros: verifica pela data de vencimento
+        STATUS_AGUARDANDO = {
+            "aguardando","aberto","em_aberto","pendente","pending","open","novo",
+        }
 
-        # ── Valor base (mensalidade/valor do plano) ──
-        if nc:
-            hub["_mens"] = hub[nc].apply(pv)
-        else:
-            hub["_mens"] = 0.0
+        def classif(row):
+            s = row["_st"]
+            # 1. Status explícito de pagamento
+            if s in STATUS_RECEBIDO: return "recebido"
+            # 2. Tem valor pago ou data de pagamento preenchida
+            if row["_vpago"] > 0: return "recebido"
+            if col_datapag:
+                dp = str(row.get(col_datapag,"")).strip()
+                if dp not in ("","nan","None","NaT","0"): return "recebido"
+            # 3. Status explícito de atraso
+            if s in STATUS_ATRASADO: return "atrasado"
+            # 4. Aguardando/pendente: decide pela data de vencimento
+            if s in STATUS_AGUARDANDO or s == "":
+                if pd.notna(row["_venc"]) and row["_venc"] < hoje:
+                    return "atrasado"   # já venceu, não foi pago
+                return "a_receber"      # ainda não venceu
+            # 5. Outros status
+            if any(x in s for x in ["cancel","inativ"]): return "cancelado"
+            if any(x in s for x in ["suspen","bloq"]):   return "suspenso"
+            return "a_receber"
 
-        # ── FATURADO: total de mensalidades emitidas ──
-        # Usa coluna de valor faturado se existir, senão usa mensalidade
-        if vpc2:
-            hub["_fat"] = hub[vpc2].apply(pv)
-        else:
-            hub["_fat"] = hub["_mens"]
-        S["fat_total"] = float(hub["_fat"].sum())
+        hub["_cat"] = hub.apply(classif, axis=1)
 
-        # ── RECEBIDO: efetivamente pago ──
-        # Detecta por: (1) coluna valor pago, (2) data pagamento preenchida,
-        # (3) status "pago/recebido", (4) fallback: ativos sem atraso
-        def detectar_recebido(row):
-            # Tem valor pago explícito?
-            if vpc and pv(row.get(vpc, 0)) > 0:
-                return True
-            # Tem data de pagamento preenchida?
-            if pc:
-                dp = str(row.get(pc, "")).strip()
-                if dp and dp not in ["", "nan", "None", "0", "NaT"]:
-                    return True
-            # Status indica pago?
-            s2 = str(row.get(sc, "") if sc else "").lower()
-            if any(x in s2 for x in ["pago","recebido","quitado","liquidado","paid"]):
-                return True
-            return False
+        # Valor de referência por categoria
+        hub["_val_cat"] = hub.apply(
+            lambda r: r["_vpago"] if (r["_cat"]=="recebido" and r["_vpago"]>0)
+                      else r["_val"], axis=1)
 
-        hub["_recebido"] = hub.apply(detectar_recebido, axis=1)
+        # ═══════════════════════════════════════════════════
+        # PASSO 5 — Calcula estatísticas
+        # ═══════════════════════════════════════════════════
+        rec_mask  = hub["_cat"] == "recebido"
+        arec_mask = hub["_cat"] == "a_receber"
+        at_mask   = hub["_cat"] == "atrasado"
 
-        if vpc:
-            hub["_val_rec"] = hub.apply(
-                lambda r: pv(r[vpc]) if r["_recebido"] else 0.0, axis=1)
-        else:
-            hub["_val_rec"] = hub.apply(
-                lambda r: r["_fat"] if r["_recebido"] else 0.0, axis=1)
+        faturado  = float(hub["_val"].sum())
+        recebido  = float(hub.loc[rec_mask,  "_vpago"].where(hub["_vpago"]>0, hub["_val"]).sum())
+        a_receber = float(hub.loc[arec_mask, "_val"].sum())
+        atrasado  = float(hub.loc[at_mask,   "_val"].sum())
+        n_clientes_uniq = hub["_nome"].nunique()
 
-        S["fat_recebido"]   = float(hub["_val_rec"].sum())
-        S["n_fat_recebido"] = int(hub["_recebido"].sum())
+        S["n_clientes"]     = n_clientes_uniq
+        S["n_ativos"]       = int(arec_mask.sum() + rec_mask.sum())
+        S["n_inad"]         = int(at_mask.sum())
+        S["n_suspensos"]    = int((hub["_cat"]=="suspenso").sum())
+        S["n_cancelados"]   = int((hub["_cat"]=="cancelado").sum())
+        S["fat_total"]      = faturado
+        S["fat_recebido"]   = recebido
+        S["fat_a_receber"]  = a_receber
+        S["fat_atrasado"]   = atrasado
+        S["fat_inad"]       = atrasado
+        S["fat_rec"]        = recebido
+        S["n_fat_recebido"] = int(rec_mask.sum())
+        S["n_fat_a_receber"]= int(arec_mask.sum())
+        S["n_fat_atrasado"] = int(at_mask.sum())
 
-        # ── ATRASADO: vencido e não pago ──
-        def detectar_atrasado(row):
-            if row["_recebido"]: return False
-            # Tem dias de atraso?
-            if dc2:
-                d = pv(row.get(dc2, 0))
-                if d > 0: return True
-            # Tem valor em aberto?
-            if vc:
-                v2 = pv(row.get(vc, 0))
-                if v2 > 0: return True
-            # Status inadimplente?
-            if is_inad[row.name] if hasattr(row, "name") else False:
-                return True
-            # Data vencimento no passado?
-            if venc:
-                try:
-                    dv = pd.to_datetime(row.get(venc), dayfirst=True)
-                    if not pd.isna(dv) and dv < hoje:
-                        return True
-                except: pass
-            return False
-
-        hub["_atrasado"] = hub.apply(detectar_atrasado, axis=1)
-
-        if vc:
-            hub["_val_atraso"] = hub.apply(
-                lambda r: pv(r[vc]) if r["_atrasado"] else 0.0, axis=1)
-        else:
-            hub["_val_atraso"] = hub.apply(
-                lambda r: r["_fat"] if r["_atrasado"] else 0.0, axis=1)
-
-        S["fat_atrasado"]   = float(hub["_val_atraso"].sum())
-        S["n_fat_atrasado"] = int(hub["_atrasado"].sum())
-
-        # ── A RECEBER: não vencido e não pago ──
-        hub["_a_receber"] = ~hub["_recebido"] & ~hub["_atrasado"]
-
-        hub["_val_a_rec"] = hub.apply(
-            lambda r: r["_fat"] if r["_a_receber"] else 0.0, axis=1)
-
-        S["fat_a_receber"]   = float(hub["_val_a_rec"].sum())
-        S["n_fat_a_receber"] = int(hub["_a_receber"].sum())
-
-        # ── Legado e percentuais ──
-        S["fat_inad"] = S["fat_atrasado"]
-        S["fat_rec"]  = S["fat_recebido"]
-
-        if S["fat_total"] > 0:
-            S["adimplencia_pct"] = round(S["fat_recebido"] / S["fat_total"] * 100, 1)
-            S["inad_pct"]        = round(S["fat_atrasado"] / S["fat_total"] * 100, 1)
+        if faturado > 0:
+            S["adimplencia_pct"] = round(recebido  / faturado * 100, 1)
+            S["inad_pct"]        = round(atrasado  / faturado * 100, 1)
             S["rec_pct"]         = S["adimplencia_pct"]
 
-        # Coluna de categoria financeira para exibição
-        def cat_fin(row):
-            if row["_recebido"]:  return "✅ Recebido"
-            if row["_atrasado"]:  return "🔴 Atrasado"
-            if row["_a_receber"]: return "🔵 A Receber"
-            return "⚪ Sem classif."
-        hub["_cat_fin"] = hub.apply(cat_fin, axis=1)
+        # Label visual para exibição
+        _LABEL = {"recebido":"✅ Recebido","a_receber":"🔵 A Receber",
+                  "atrasado":"🔴 Atrasado","suspenso":"🟡 Suspenso","cancelado":"⚫ Cancelado"}
+        hub["_cat_fin"] = hub["_cat"].map(lambda c: _LABEL.get(c,"❓ "+c))
 
-        # ── DFs filtrados ──
-        inad = hub[hub["_atrasado"]].copy()
-        if dc2:  inad["_dias"]   = inad[dc2].apply(lambda x: int(pv(x)))
-        else:    inad["_dias"]   = 0
-        inad["_val_ab"] = inad["_val_atraso"]
-        st_session_inad = inad.sort_values("_val_ab", ascending=False)
+        # Coluna de dias de atraso (para inadimplentes)
+        if col_dias:
+            hub["_dias"] = hub[col_dias].apply(lambda x: int(pv(x)))
+        else:
+            # Calcula pelos dias entre vencimento e hoje
+            hub["_dias"] = (hoje - hub["_venc"]).dt.days.fillna(0).clip(lower=0).astype(int)
 
-        rec_df = hub[hub["_recebido"]].copy()
-        st_session_rec = rec_df
-        st_session_hub = hub
+        hub["_val_ab"] = hub.apply(
+            lambda r: r["_val"] if r["_cat"]=="atrasado" else 0.0, axis=1)
+
+        # Diagnóstico de colunas detectadas
+        _st.session_state.hub_diag = {
+            "ID cobrança":       col_id     or "—",
+            "Nome cliente":      col_nome   or "—",
+            "Serviço/Plano":     col_serv   or "—",
+            "Status":            col_status or "—",
+            "Data vencimento":   col_venc   or "—",
+            "Valor cobrado":     col_valor  or "—",
+            "Data pagamento":    col_datapag or "—",
+            "Valor pago":        col_vpago  or "—",
+        }
+
+        # DFs derivados
+        inad_df       = hub[at_mask].sort_values("_val_ab", ascending=False)
+        st_session_inad = inad_df
+        st_session_rec  = hub[rec_mask].copy()
+        st_session_hub  = hub
     else:
         st_session_inad = pd.DataFrame()
         st_session_rec  = pd.DataFrame()
@@ -1003,74 +1066,38 @@ elif "Importar" in page:
             n_rows  = len(limpar(hub_raw))
             st.success(f"✅ **{n_rows}** registros carregados")
 
-            # ── Seletor de colunas ──
-            with st.expander("⚙️ Configurar colunas (clique se os valores estiverem errados)", expanded=st.session_state.get("col_expanded", False)):
-                st.caption("Selecione qual coluna da planilha representa cada informação financeira:")
-                cols_disp = ["(auto)"] + list(hub_raw.columns)
+            # ── Diagnóstico automático de colunas ──
+            diag = st.session_state.get("hub_diag", {})
+            s_prev = st.session_state.stats
 
-                # Mostra amostra de valores para ajudar o usuário
-                st.markdown("**Prévia das primeiras linhas:**")
-                st.dataframe(hub_raw.head(3), use_container_width=True, hide_index=True)
+            # Validação automática da média
+            media_ok = False
+            media_txt = "—"
+            if s_prev["fat_total"] > 0 and s_prev["n_clientes"] > 0:
+                media = s_prev["fat_total"] / s_prev["n_clientes"]
+                media_ok = 10 <= media <= 50000
+                media_txt = brl(media)
 
-                g1, g2 = st.columns(2)
-                with g1:
-                    col_valor = st.selectbox("💰 Coluna de valor/mensalidade:",
-                        cols_disp, key="col_valor",
-                        index=0,
-                        help="Valor mensal cobrado por cliente")
-                    col_status = st.selectbox("📌 Coluna de status:",
-                        cols_disp, key="col_status",
-                        index=0,
-                        help="Status do cliente: ativo, inadimplente, etc")
-                    col_pago = st.selectbox("✅ Coluna de data/valor pago:",
-                        cols_disp, key="col_pago",
-                        index=0,
-                        help="Data de pagamento ou valor efetivamente pago")
-                with g2:
-                    col_atraso = st.selectbox("🔴 Coluna de valor em atraso:",
-                        cols_disp, key="col_atraso",
-                        index=0,
-                        help="Valor em aberto ou atrasado")
-                    col_dias = st.selectbox("⏱ Coluna de dias de atraso:",
-                        cols_disp, key="col_dias",
-                        index=0,
-                        help="Número de dias em atraso")
-                    col_venc = st.selectbox("📅 Coluna de vencimento:",
-                        cols_disp, key="col_venc",
-                        index=0,
-                        help="Data de vencimento da fatura")
+            status_cor = "#22A85A" if media_ok else "#D97706"
+            status_ico = "✅" if media_ok else "⚠️"
+            status_msg = "Valores detectados com sucesso" if media_ok else "Verifique — média por cliente parece incorreta"
 
-                # Salva mapeamento manual
-                col_map = {
-                    "valor":  col_valor  if col_valor  != "(auto)" else None,
-                    "status": col_status if col_status != "(auto)" else None,
-                    "pago":   col_pago   if col_pago   != "(auto)" else None,
-                    "atraso": col_atraso if col_atraso != "(auto)" else None,
-                    "dias":   col_dias   if col_dias   != "(auto)" else None,
-                    "venc":   col_venc   if col_venc   != "(auto)" else None,
-                }
-                st.session_state.hub_col_map = col_map
-
-                if st.button("🔄 Reaplicar com estas colunas", type="primary", use_container_width=True):
-                    st.session_state.col_expanded = True
-                    recalc()
-                    st.rerun()
-
-                # Mostra média por cliente para validação
-                s_prev = st.session_state.stats
-                if s_prev["fat_total"] > 0 and s_prev["n_clientes"] > 0:
-                    media = s_prev["fat_total"] / s_prev["n_clientes"]
-                    st.markdown(f"""
-                    <div style='background:#F6F4F1;border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px'>
-                        📊 <strong>Validação:</strong> Média por cliente = <strong>{brl(media)}</strong>
-                        {'✅ Parece correto' if 50 < media < 50000 else '⚠️ Valor suspeito — verifique a coluna selecionada'}
-                    </div>""", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style='background:#F6F4F1;border-radius:9px;padding:12px 14px;margin-bottom:8px;font-size:12px'>
+                <div style='font-weight:700;color:{status_cor};margin-bottom:6px'>
+                    {status_ico} {status_msg} · Média/cliente: <strong>{media_txt}</strong>
+                </div>
+                <div style='display:grid;grid-template-columns:1fr 1fr;gap:3px'>
+                    {"".join(f"<div style='color:#555'><span style='color:#888'>▸ {k}:</span> <strong>{v}</strong></div>" for k,v in diag.items())}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
             if st.button("🗑️ Remover Hubsoft"):
                 st.session_state.hub_df = None
                 st.session_state.hub_col_map = {}
+                st.session_state.hub_diag = {}
                 st.session_state.inad_df = pd.DataFrame()
-                st.session_state.col_expanded = False
                 recalc()
                 st.rerun()
         else:
@@ -1084,7 +1111,6 @@ elif "Importar" in page:
                 if df is not None and not df.empty:
                     st.session_state.hub_df = df
                     st.session_state.hub_col_map = {}
-                    st.session_state.col_expanded = True  # abre config automaticamente
                     recalc()
                     st.success(f"✅ {fh.name} · {len(df)} linhas importadas!")
                     st.rerun()
