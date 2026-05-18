@@ -171,9 +171,7 @@ for k, v in {
 def brl(v):
     """Formata valor no padrão brasileiro: R$ 1.234.567,89"""
     try:
-        n = float(v)
-        # f"{n:,.2f}" → "1,234,567.89" (padrão US)
-        # Converte para BR: . milhar, , decimal
+        n = abs(float(v))  # sempre positivo — débitos são custos
         s = f"{n:,.2f}".replace(".", "X").replace(",", ".").replace("X", ",")
         return f"R$ {s}"
     except:
@@ -182,7 +180,7 @@ def brl(v):
 def pv(v):
     """Parse qualquer formato monetário brasileiro ou internacional."""
     if v is None: return 0.0
-    if isinstance(v, (int, float)): return float(v)
+    if isinstance(v, (int, float)): return abs(float(v))  # Hubsoft exporta débitos negativos
     s = str(v).strip()
     if s in ("", "-", "nan", "None", "null", "N/A", "0,0"): return 0.0
     s = s.replace("R$","").replace("$","").replace(" ","").strip()
@@ -205,7 +203,7 @@ def pv(v):
             parts = s.split(".")
             if not (len(parts) == 2 and len(parts[1]) <= 2):
                 s = s.replace(".","")           # BR milhar sem centavos: 1.290.500
-        return float(s)
+        return abs(float(s))
     except:
         return 0.0
 
