@@ -349,34 +349,58 @@ class HubsoftAPI:
         for vc in ["valor","valor_pago"]:
             if vc in df.columns:
                 df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
-        PAGO = {
-            # Hubsoft variações de status pago
-            "pago","pago_total","pago_parcial","pago completo",
-            "baixado_banco","baixado_pix","baixado_manual",
-            "baixado_parcial","baixado_faturamento","baixado cheque",
-            "quitado","quitado_parcial","recebido","recebido_parcial",
-            "liquidado","liquidado_parcial","liquidado parcial",
-            "sim","yes","1","true",
-            # Status numéricos
-            "2","3","4","5",
-        }
-        # Loga status únicos para diagnóstico (primeiras 3 ocorrências)
+        # ── Loga todos os campos para diagnóstico ──
+        print(f"  Colunas disponíveis na API: {list(df.columns)}")
         if "status_raw" in df.columns:
-            status_unicos = df["status_raw"].fillna("").astype(str).str.lower().unique()
-            print(f"  Status Hubsoft encontrados: {list(status_unicos)[:15]}")
-            for s in status_unicos:
-                if s not in PAGO and s not in ("","nan","aberto","pendente","a_vencer","vencido"):
-                    print(f"  ⚠️  Status desconhecido: '{s}' — considere adicionar ao set PAGO")
+            status_unicos = df["status_raw"].fillna("VAZIO").astype(str).str.lower().unique()
+            print(f"  Valores de status_raw: {list(status_unicos)[:10]}")
+        if "recebido" in df.columns:
+            print(f"  Campo 'recebido' sample: {df['recebido'].head(3).tolist()}")
+        if "valor_pago" in df.columns:
+            print(f"  Campo 'valor_pago' sample: {df['valor_pago'].head(3).tolist()}")
+        if "data_pagamento" in df.columns:
+            print(f"  Campo 'data_pagamento' sample (não-null): {df['data_pagamento'].dropna().head(3).tolist()}")
+
+        # ── CLASSIFICAÇÃO MULTI-CRITÉRIO ──────────────────────────────
+        # Hubsoft usa "recebido" (campo booleano/numérico) OU "data_pagamento" preenchida
+        # OU status_raw com variações de "liquidado", "baixado", "recebido", "pago"
+        PAGO_STATUS = {
+            # Termos em português
+            "pago","pago_total","pago_parcial","pago completo",
+            "recebido","recebido_total","recebido_parcial",
+            "liquidado","liquidado_total","liquidado_parcial",
+            "baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+            "baixado_faturamento","baixado cheque","baixado",
+            "quitado","quitado_parcial",
+            # Valores booleanos/numéricos
+            "sim","yes","true","1","2","3",
+        }
 
         def _st(row):
+            # 1. Verifica campo "recebido" (booleano Hubsoft)
+            rec = str(row.get("recebido","")).lower().strip()
+            if rec in ("sim","yes","true","1","s"): return "PAGO"
+            # 2. Verifica valor_pago > 0
+            vp = 0.0
+            try: vp = float(row.get("valor_pago", 0) or 0)
+            except: pass
+            if vp > 0: return "PAGO"
+            # 3. Verifica data_pagamento preenchida
+            dp = row.get("data_pagamento")
+            if pd.notna(dp) and str(dp).strip() not in ("","None","NaT","nan"): return "PAGO"
+            # 4. Verifica status_raw
             s = str(row.get("status_raw","")).lower().strip()
-            if s in PAGO: return "PAGO"
+            if s in PAGO_STATUS: return "PAGO"
+            # 5. Classifica por data de vencimento
             d = row.get("data_vencimento")
             if pd.notna(d) and pd.Timestamp(d) < today: return "ATRASADO"
             return "A_VENCER"
-        df["status"]         = df.apply(_st, axis=1)
-        pago_count = (df["status"] == "PAGO").sum()
-        print(f"  Classificados: PAGO={pago_count}, ATRASADO={(df['status']=='ATRASADO').sum()}, A_VENCER={(df['status']=='A_VENCER').sum()}")
+
+        df["status"] = df.apply(_st, axis=1)
+        p = (df["status"]=="PAGO").sum()
+        a = (df["status"]=="ATRASADO").sum()
+        v = (df["status"]=="A_VENCER").sum()
+        print(f"  Classificados: PAGO={p}, ATRASADO={a}, A_VENCER={v}")
         df["dias_atraso"]    = df["data_vencimento"].apply(
             lambda d: max(0,(today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
         df["valor_pendente"] = df.apply(
