@@ -1,7 +1,6 @@
 """
 HUBSOFT API — Grupo Jet Telecom
 Auto-importação: clientes, cobranças pagas, abertas, atrasadas, a vencer.
-Documentação: https://docs.hubsoft.com.br
 """
 import requests
 import pandas as pd
@@ -16,36 +15,22 @@ OAUTH_PATHS = [
     "/oauth/access-token",
     "/api/v1/oauth/token",
     "/api/v1/auth/token",
-    "/login",
-    "/api/login",
 ]
 
 
 def _base_urls(base):
-    """
-    Gera variações da base URL para tentar na autenticação.
-    A URL exata fornecida é sempre a primeira tentativa.
-    """
     urls = [base.rstrip("/")]
-    # Tenta sem trailing /api (caso o usuário tenha colocado /api extra)
     clean = re.sub(r"/api/?$", "", base.rstrip("/"))
     if clean not in urls:
         urls.append(clean)
-    # Tenta com /api appended
-    no_api = clean
-    if not no_api.endswith("/api"):
-        candidate = no_api + "/api"
+    if not clean.endswith("/api"):
+        candidate = clean + "/api"
         if candidate not in urls:
             urls.append(candidate)
     return urls
 
 
 def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
-    """
-    Descobre automaticamente o endpoint OAuth correto do Hubsoft.
-    Testa form-urlencoded e JSON em múltiplos paths e base URLs.
-    Retorna (token, base_url_funcionou, path_funcionou) ou lança ConnectionError.
-    """
     body = {
         "grant_type":    "password",
         "client_id":     str(client_id),
@@ -69,7 +54,7 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
                     r = s.post(url, timeout=15, **kw)
                     if r.status_code == 404:
                         errors.append(f"404 {base}{path}")
-                        break   # endpoint não existe, vai para próximo path
+                        break
                     if r.status_code == 405:
                         errors.append(f"405 {base}{path} ({ct_name})")
                         continue
@@ -84,11 +69,10 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
                     if not tok:
                         errors.append(f"sem_token {base}{path}: {str(data)[:60]}")
                         continue
-                    # Sucesso!
                     return tok, base, path
                 except requests.exceptions.ConnectionError as ce:
                     errors.append(f"conn_err {base}: {str(ce)[:60]}")
-                    break   # não tem rede para este base, tenta próximo base
+                    break
                 except Exception as ex:
                     errors.append(f"err {base}{path}: {type(ex).__name__}:{str(ex)[:60]}")
 
@@ -98,8 +82,15 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
     )
 
 
-# ══════════════════════════════════════════════════════════════════════
 class HubsoftAPI:
+
+    COBRANCA_ENDPOINTS = [
+        "/api/v1/integracao/financeiro/fatura",
+        "/api/v1/integracao/financeiro/cobranca",
+        "/api/v1/integracao/cliente/financeiro",
+        "/financeiro/fatura",
+        "/financeiro/cobranca",
+    ]
 
     def __init__(self, base_url, client_id, client_secret, username, password):
         self.base_url      = base_url.rstrip("/")
@@ -128,12 +119,8 @@ class HubsoftAPI:
         if not self.token or datetime.now() >= (self.token_expiry or datetime.min):
             self.autenticar()
 
-    # Variações de prefixo de endpoint para tentar em caso de 404
-    ENDPOINT_PREFIXES = ["", "/api", "/v1", "/api/v1"]
-
     def _get(self, endpoint, params=None, tentativas=3):
         self._ok_token()
-        # Remove /api/v1 prefix se o servidor já tem isso na base
         url = f"{self._base_ativo}{endpoint}"
         for t in range(tentativas):
             try:
@@ -142,18 +129,7 @@ class HubsoftAPI:
                     self.autenticar()
                     r = self.s.get(url, params=params or {}, timeout=30)
                 if r.status_code == 404:
-                    # Tenta variações do prefixo
-                    ep_clean = endpoint.lstrip("/")
-                    # Remove prefixos comuns e tenta de novo
-                    for strip in ["api/v1/integracao/","api/v1/","v1/integracao/","v1/"]:
-                        if ep_clean.startswith(strip):
-                            alt_ep = "/" + ep_clean[len(strip):]
-                            alt_url = f"{self._base_ativo}{alt_ep}"
-                            r2 = self.s.get(alt_url, params=params or {}, timeout=30)
-                            if r2.status_code != 404:
-                                print(f"  → usando endpoint alternativo: {alt_ep}")
-                                r2.raise_for_status()
-                                return r2.json()
+                    raise requests.exceptions.HTTPError(f"404 Not Found: {url}")
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.Timeout:
@@ -163,29 +139,31 @@ class HubsoftAPI:
 
     def _paginar(self, endpoint, params=None, limit=100, max_pag=500):
         p = dict(params or {})
-        p["pagina"]          = 0
-        p["itens_por_pagina"]= limit
-        dados = []
+        p["pagina"]           = 0
+        p["itens_por_pagina"] = limit
+        dados          = []
         total_esperado = None
 
         for n_pag in range(max_pag):
             resp = self._get(endpoint, p)
             pag  = resp.get("paginacao") or {}
 
-            # Extrai dados PRIMEIRO
-            bloco = (resp.get("dados") or resp.get("data") or
-                     resp.get("clientes") or resp.get("contratos") or
-                     resp.get("faturas") or resp.get("cobrancas") or [])
+            # ── Extrai bloco de dados ──────────────────────────────────
+            bloco = (
+                resp.get("dados") or resp.get("data") or
+                resp.get("clientes") or resp.get("contratos") or
+                resp.get("faturas") or resp.get("cobrancas") or []
+            )
 
-            # Loga estrutura na primeira chamada
+            # Loga na primeira página
             if n_pag == 0:
                 total_esperado = pag.get("total_registros", "?")
                 ultima_pag     = pag.get("ultima_pagina", 0)
-                resp_keys = list(resp.keys())
-                print(f"  Resp keys: {resp_keys}")
+                print(f"  Resp keys: {list(resp.keys())}")
                 print(f"  Paginacao: total={total_esperado} paginas={ultima_pag+1} itens/pag={limit}")
                 if not bloco:
-                    print(f"  ATENCAO: bloco vazio! resp={str(resp)[:200]}")
+                    print(f"  ATENCAO bloco vazio: {str(resp)[:300]}")
+
             if isinstance(bloco, list):
                 dados.extend(bloco)
             elif isinstance(bloco, dict) and bloco:
@@ -197,84 +175,33 @@ class HubsoftAPI:
                 break
             p["pagina"] = atual + 1
 
-        print(f"  Total carregado: {len(dados)} registros")
-        if total_esperado and str(total_esperado).isdigit() and len(dados) < int(total_esperado):
-            print(f"  INCOMPLETO: {len(dados)} de {total_esperado}")
+        total_str = str(total_esperado) if total_esperado else "?"
+        print(f"  Total carregado: {len(dados)}" +
+              (f" de {total_str}" if total_str != "?" else ""))
         return dados
 
-    def descobrir_endpoints(self):
-        """
-        Testa os endpoints mais comuns e retorna quais respondem 200.
-        Use para diagnosticar qual versão/configuração do Hubsoft está ativa.
-        """
-        self._ok_token()
-        candidatos = [
-            "/api/v1/integracao/financeiro/fatura",
-            "/api/v1/integracao/financeiro/cobranca",
-            "/api/v1/integracao/cliente/financeiro",
-            "/api/v1/integracao/cliente",
-            "/api/v1/integracao/contrato",
-            "/api/v1/integracao/plano",
-            "/api/v1/integracao/financeiro",
-            "/api/v1/integracao",
-            "/api/v1",
-        ]
-        resultado = {}
-        for ep in candidatos:
-            url = f"{self._base_ativo}{ep}"
-            try:
-                r = self.s.get(url, params={"pagina":0,"itens_por_pagina":1}, timeout=10)
-                resultado[ep] = r.status_code
-            except Exception as e:
-                resultado[ep] = str(e)[:40]
-        return resultado
-
     # ── CLIENTES ─────────────────────────────────────────────────────
-    CLIENTE_ENDPOINTS = [
-        "/api/v1/integracao/cliente",
-        "/api/v1/cliente",
-        "/cliente",
-    ]
-
     def get_clientes(self, status="ativo"):
         params = {} if status == "todos" else {"status": status}
-        for ep in self.CLIENTE_ENDPOINTS:
+        for ep in ["/api/v1/integracao/cliente", "/api/v1/cliente"]:
             try:
                 dados = self._paginar(ep, params)
                 if dados:
-                    break
+                    df = pd.json_normalize(dados)
+                    rename = {
+                        "id": "id_cliente", "nome_razaosocial": "nome",
+                        "cpf_cnpj": "cpf_cnpj", "email": "email",
+                        "telefone": "telefone", "status": "status",
+                        "data_cadastro": "data_cadastro",
+                        "endereco.cidade": "cidade", "endereco.estado": "estado",
+                    }
+                    return df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
             except Exception as e:
-                if "404" in str(e) or "Not Found" in str(e):
-                    continue
+                if "404" in str(e): continue
                 raise
-        else:
-            return pd.DataFrame()
-        if not dados:
-            return pd.DataFrame()
-        df = pd.json_normalize(dados)
-        rename = {
-            "id":               "id_cliente",
-            "nome_razaosocial": "nome",
-            "cpf_cnpj":         "cpf_cnpj",
-            "email":            "email",
-            "telefone":         "telefone",
-            "status":           "status",
-            "data_cadastro":    "data_cadastro",
-            "endereco.cidade":  "cidade",
-            "endereco.estado":  "estado",
-        }
-        return df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
+        return pd.DataFrame()
 
     # ── COBRANÇAS ─────────────────────────────────────────────────────
-    # Endpoints alternativos de cobranças/faturas (tenta em ordem)
-    COBRANCA_ENDPOINTS = [
-        "/api/v1/integracao/financeiro/fatura",      # ← funciona neste servidor
-        "/api/v1/integracao/financeiro/cobranca",
-        "/api/v1/integracao/cliente/financeiro",
-        "/financeiro/fatura",
-        "/financeiro/cobranca",
-    ]
-
     def get_cobrancas(self, data_ini, data_fim,
                       tipo_data="vencimento", pago=None, status_pag=None):
         params = {
@@ -286,54 +213,20 @@ class HubsoftAPI:
         if status_pag:
             params["status_pagamento"] = status_pag
 
-        # Tenta cada endpoint até achar um que funcione
         last_err = None
         for ep in self.COBRANCA_ENDPOINTS:
             try:
                 dados = self._paginar(ep, params)
                 if dados:
-                    print(f"  ✅ Cobranças via: {ep} ({len(dados)} registros)")
+                    print(f"  Endpoint: {ep} -> {len(dados)} registros")
                     return self._norm_cobrancas(pd.json_normalize(dados))
             except Exception as e:
                 last_err = e
                 if "404" in str(e) or "Not Found" in str(e):
-                    continue  # tenta próximo endpoint
-                raise  # outro erro — propaga
-
-        if last_err:
-            raise last_err
-        return pd.DataFrame()
-
-    FATURA_ENDPOINTS = [
-        "/api/v1/integracao/financeiro/fatura",
-        "/api/v1/integracao/financeiro/cobranca",
-        "/api/v1/integracao/cliente/financeiro",
-        "/financeiro/fatura",
-    ]
-
-    def get_faturas(self, data_ini, data_fim, status_pag=None):
-        params = {
-            "data_vencimento_ini": data_ini,
-            "data_vencimento_fim": data_fim,
-        }
-        if status_pag:
-            params["status_pagamento"] = status_pag
-        for ep in self.FATURA_ENDPOINTS:
-            try:
-                dados = self._paginar(ep, params)
-                if dados:
-                    df = pd.json_normalize(dados)
-                    for dc in ["data_vencimento","data_pagamento"]:
-                        if dc in df.columns:
-                            df[dc] = pd.to_datetime(df[dc], errors="coerce")
-                    for vc in ["valor_total","valor_pago"]:
-                        if vc in df.columns:
-                            df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
-                    return df
-            except Exception as e:
-                if "404" in str(e) or "Not Found" in str(e):
                     continue
                 raise
+        if last_err:
+            raise last_err
         return pd.DataFrame()
 
     # ── Normaliza cobranças ───────────────────────────────────────────
@@ -350,13 +243,12 @@ class HubsoftAPI:
             "cliente.nome":             "nome_cliente",
             "valor":                    "valor",
             "valor_pago":               "valor_pago",
+            "recebido":                 "recebido",
             "data_vencimento":          "data_vencimento",
             "data_pagamento":           "data_pagamento",
             "data_lancamento":          "data_lancamento",
             "status":                   "status_raw",
             "descricao":                "descricao",
-            "servico":                  "servico",
-            "forma_pagamento":          "forma_pagamento",
         }
         df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
         for c in ["id_cobranca","nome_cliente","valor","data_vencimento","status_raw"]:
@@ -368,49 +260,35 @@ class HubsoftAPI:
         for vc in ["valor","valor_pago"]:
             if vc in df.columns:
                 df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
-        # ── Loga todos os campos para diagnóstico ──
-        print(f"  Colunas disponíveis na API: {list(df.columns)}")
-        if "status_raw" in df.columns:
-            status_unicos = df["status_raw"].fillna("VAZIO").astype(str).str.lower().unique()
-            print(f"  Valores de status_raw: {list(status_unicos)[:10]}")
-        if "recebido" in df.columns:
-            print(f"  Campo 'recebido' sample: {df['recebido'].head(3).tolist()}")
-        if "valor_pago" in df.columns:
-            print(f"  Campo 'valor_pago' sample: {df['valor_pago'].head(3).tolist()}")
-        if "data_pagamento" in df.columns:
-            print(f"  Campo 'data_pagamento' sample (não-null): {df['data_pagamento'].dropna().head(3).tolist()}")
 
-        # ── CLASSIFICAÇÃO MULTI-CRITÉRIO ──────────────────────────────
-        # Hubsoft usa "recebido" (campo booleano/numérico) OU "data_pagamento" preenchida
-        # OU status_raw com variações de "liquidado", "baixado", "recebido", "pago"
+        # Log para diagnóstico
+        print(f"  Colunas API: {list(df.columns)}")
+        if "status_raw" in df.columns:
+            print(f"  Status valores: {df['status_raw'].fillna('VAZIO').astype(str).str.lower().unique()[:8].tolist()}")
+        if "recebido" in df.columns:
+            print(f"  Campo recebido sample: {df['recebido'].head(3).tolist()}")
+
         PAGO_STATUS = {
-            # Termos em português
-            "pago","pago_total","pago_parcial","pago completo",
-            "recebido","recebido_total","recebido_parcial",
-            "liquidado","liquidado_total","liquidado_parcial",
-            "baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
-            "baixado_faturamento","baixado cheque","baixado",
-            "quitado","quitado_parcial",
-            # Valores booleanos/numéricos
-            "sim","yes","true","1","2","3",
+            "pago","pago_total","pago_parcial","recebido","recebido_total",
+            "liquidado","liquidado_total","baixado_banco","baixado_pix",
+            "baixado_manual","baixado_faturamento","quitado","sim","yes","true","1",
         }
 
         def _st(row):
-            # 1. Verifica campo "recebido" (booleano Hubsoft)
+            # 1. Campo recebido (booleano Hubsoft)
             rec = str(row.get("recebido","")).lower().strip()
             if rec in ("sim","yes","true","1","s"): return "PAGO"
-            # 2. Verifica valor_pago > 0
-            vp = 0.0
-            try: vp = float(row.get("valor_pago", 0) or 0)
+            # 2. valor_pago > 0
+            try:
+                if float(row.get("valor_pago", 0) or 0) > 0: return "PAGO"
             except: pass
-            if vp > 0: return "PAGO"
-            # 3. Verifica data_pagamento preenchida
+            # 3. data_pagamento preenchida
             dp = row.get("data_pagamento")
             if pd.notna(dp) and str(dp).strip() not in ("","None","NaT","nan"): return "PAGO"
-            # 4. Verifica status_raw
+            # 4. status_raw
             s = str(row.get("status_raw","")).lower().strip()
             if s in PAGO_STATUS: return "PAGO"
-            # 5. Classifica por data de vencimento
+            # 5. por vencimento
             d = row.get("data_vencimento")
             if pd.notna(d) and pd.Timestamp(d) < today: return "ATRASADO"
             return "A_VENCER"
@@ -419,15 +297,18 @@ class HubsoftAPI:
         p = (df["status"]=="PAGO").sum()
         a = (df["status"]=="ATRASADO").sum()
         v = (df["status"]=="A_VENCER").sum()
-        print(f"  Classificados: PAGO={p}, ATRASADO={a}, A_VENCER={v}")
-        df["dias_atraso"]    = df["data_vencimento"].apply(
-            lambda d: max(0,(today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
-        df["valor_pendente"] = df.apply(
-            lambda r: 0.0 if r["status"]=="PAGO" else float(r.get("valor",0)), axis=1)
+        print(f"  Classificados: PAGO={p} ATRASADO={a} A_VENCER={v}")
+
         if "nome_cliente" in df.columns:
             mask = df["nome_cliente"].fillna("").str.upper().apply(
                 lambda n: any(ic in n for ic in IC_NOMES))
             df = df[~mask]
+
+        df["dias_atraso"] = df["data_vencimento"].apply(
+            lambda d: max(0,(today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
+        df["valor_pendente"] = df.apply(
+            lambda r: 0.0 if r["status"]=="PAGO" else float(r.get("valor",0)), axis=1)
+
         return df.reset_index(drop=True)
 
     # ── IMPORTAR TUDO ─────────────────────────────────────────────────
@@ -436,78 +317,43 @@ class HubsoftAPI:
             mes = datetime.now().strftime("%Y-%m")
         ano, m   = map(int, mes.split("-"))
         ult_dia  = calendar.monthrange(ano, m)[1]
-        d_ini    = f"{mes}-01"              # sempre do dia 1
-        d_fim    = f"{mes}-{ult_dia:02d}"  # até o último dia do mês
-
-        # ── ESTRATÉGIA COMPLETA ───────────────────────────────────────────
-        # Busca em paralelo:
-        # A) Faturas com VENCIMENTO no mês (maio 01→31)
-        # B) Faturas ATRASADAS com vencimento em meses anteriores ainda em aberto
-        # C) Combina tudo sem duplicatas
+        d_ini    = f"{mes}-01"
+        d_fim    = f"{mes}-{ult_dia:02d}"
 
         print(f"=== HUBSOFT importar_tudo({mes}) ===")
+        print(f"  Buscando faturas {d_ini} a {d_fim}...")
 
-        # ── Busca TODAS as faturas do mês por vencimento ─────────────
-        # Sem filtro de status — o Hubsoft retorna tudo que vence no período
-        print(f"  Buscando faturas venc {d_ini} a {d_fim}...")
         cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
-        print(f"  → {len(cob_mes)} faturas")
+        print(f"  → {len(cob_mes)} faturas no mês")
 
-        # Se trouxe menos de 5, tenta buscar SEM filtro de data (tudo do sistema)
-        if len(cob_mes) < 5:
-            print("  Poucos resultados — tentando sem filtro de data...")
-            cob_all = self._paginar(self.COBRANCA_ENDPOINTS[0], {})
-            if len(cob_all) > len(cob_mes):
-                df_all = self._norm_cobrancas(pd.json_normalize(cob_all))
-                # Filtra pelo mês selecionado
-                if "data_vencimento" in df_all.columns:
-                    mask = (
-                        (df_all["data_vencimento"] >= pd.Timestamp(d_ini)) &
-                        (df_all["data_vencimento"] <= pd.Timestamp(d_fim))
-                    )
-                    cob_mes = df_all[mask].copy()
-                    print(f"  → filtrado do total: {len(cob_mes)} faturas")
-
-        cob_pagas = cob_mes  # referência para classificação
-
-        # ── Recebidos = faturas classificadas como PAGO ───────────────
-        if not cob_mes.empty and "status" in cob_mes.columns:
-            cob_rec = cob_mes[cob_mes["status"] == "PAGO"].copy()
-            if cob_rec.empty and not cob_pagas.empty:
-                print("  0 PAGO — usando fallback (faturas sem status 'aberto')")
-                cob_rec = cob_pagas.copy()
-                cob_rec["status"] = "PAGO"
-        else:
-            cob_rec = pd.DataFrame()
-
-        print(f"  PAGO={len(cob_rec)} | Total={len(cob_mes)}")
-        try:    clientes = self.get_clientes("ativo")
-        except: clientes = pd.DataFrame()
+        try:
+            clientes = self.get_clientes("ativo")
+        except Exception:
+            clientes = pd.DataFrame()
 
         pagas     = cob_mes[cob_mes["status"]=="PAGO"]     if not cob_mes.empty else pd.DataFrame()
         atrasadas = cob_mes[cob_mes["status"]=="ATRASADO"] if not cob_mes.empty else pd.DataFrame()
         a_vencer  = cob_mes[cob_mes["status"]=="A_VENCER"] if not cob_mes.empty else pd.DataFrame()
 
+        # rec_df para o app (faturamento)
         rec_df = pd.DataFrame()
         if not cob_mes.empty:
             rec_df = cob_mes.rename(columns={"nome_cliente":"nome_razaosocial"}).copy()
             rec_df["__val"]    = pd.to_numeric(rec_df.get("valor",0), errors="coerce").fillna(0)
             rec_df["__venc"]   = rec_df.get("data_vencimento")
             rec_df["__nome"]   = rec_df.get("nome_razaosocial","").fillna("").astype(str)
-            # Se nenhuma foi classificada como PAGO, usa cob_pagas como referência
-            # (o call sem filtro de status retorna as pagas por padrão no Hubsoft)
+            # __pago: usa critério de status
             status_pago_mask = rec_df.get("status", pd.Series()) == "PAGO"
-            if status_pago_mask.sum() == 0 and not cob_pagas.empty:
-                id_col_chk = "id_cobranca"
-                if id_col_chk in rec_df.columns and id_col_chk in cob_pagas.columns:
-                    ids_pagas_set = set(cob_pagas[id_col_chk].astype(str))
-                    status_pago_mask = rec_df[id_col_chk].astype(str).isin(ids_pagas_set)
-                else:
-                    # Sem id disponível: marca tudo do cob_pagas como pago por índice
-                    status_pago_mask = rec_df.index < len(cob_pagas)
+            if status_pago_mask.sum() == 0 and not pagas.empty:
+                id_col = "id_cobranca"
+                if id_col in rec_df.columns and id_col in pagas.columns:
+                    ids_p = set(pagas[id_col].astype(str))
+                    status_pago_mask = rec_df[id_col].astype(str).isin(ids_p)
             rec_df["__pago"]   = status_pago_mask
             rec_df["__nome_c"] = rec_df["__nome"]
 
+        # rec_recebidos (equivale ao extrato)
+        cob_rec = pagas if not pagas.empty else pd.DataFrame()
         rec_recebidos = pd.DataFrame()
         if not cob_rec.empty:
             rec_recebidos = pd.DataFrame({
@@ -519,20 +365,24 @@ class HubsoftAPI:
             rec_recebidos = rec_recebidos[rec_recebidos["__val"] > 0]
 
         totais = {
-            "faturado":     float(cob_mes["valor"].sum()) if not cob_mes.empty else 0.0,
-            "recebido":     float(rec_recebidos["__val"].sum()) if not rec_recebidos.empty else 0.0,
-            "atrasado":     float(atrasadas["valor"].sum()) if not atrasadas.empty else 0.0,
-            "a_vencer":     float(a_vencer["valor"].sum()) if not a_vencer.empty else 0.0,
-            "n_cobrancas":  len(cob_mes),
-            "n_pagas":      len(pagas),
-            "n_atrasadas":  len(atrasadas),
-            "n_a_vencer":   len(a_vencer),
-            "n_clientes":   len(clientes),
-            "adimplencia":  round(len(pagas)/max(len(cob_mes),1)*100,1),
-            "mes":          mes,
-            "fonte":        "hubsoft_api",
-            "atualizado_em":(datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M"),
+            "faturado":      float(cob_mes["valor"].sum()) if not cob_mes.empty else 0.0,
+            "recebido":      float(rec_recebidos["__val"].sum()) if not rec_recebidos.empty else 0.0,
+            "atrasado":      float(atrasadas["valor"].sum()) if not atrasadas.empty else 0.0,
+            "a_vencer":      float(a_vencer["valor"].sum()) if not a_vencer.empty else 0.0,
+            "n_cobrancas":   len(cob_mes),
+            "n_pagas":       len(pagas),
+            "n_atrasadas":   len(atrasadas),
+            "n_a_vencer":    len(a_vencer),
+            "n_clientes":    len(clientes),
+            "adimplencia":   round(len(pagas)/max(len(cob_mes),1)*100,1),
+            "mes":           mes,
+            "fonte":         "hubsoft_api",
+            "atualizado_em": (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M"),
         }
+
+        print(f"  Totais: fat={totais['faturado']:.2f} rec={totais['recebido']:.2f} "
+              f"atr={totais['atrasado']:.2f} av={totais['a_vencer']:.2f}")
+
         return {
             "rec_df":        rec_df,
             "rec_recebidos": rec_recebidos,
