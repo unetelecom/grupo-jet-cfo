@@ -128,8 +128,12 @@ class HubsoftAPI:
         if not self.token or datetime.now() >= (self.token_expiry or datetime.min):
             self.autenticar()
 
+    # Variações de prefixo de endpoint para tentar em caso de 404
+    ENDPOINT_PREFIXES = ["", "/api", "/v1", "/api/v1"]
+
     def _get(self, endpoint, params=None, tentativas=3):
         self._ok_token()
+        # Remove /api/v1 prefix se o servidor já tem isso na base
         url = f"{self._base_ativo}{endpoint}"
         for t in range(tentativas):
             try:
@@ -137,6 +141,19 @@ class HubsoftAPI:
                 if r.status_code == 401:
                     self.autenticar()
                     r = self.s.get(url, params=params or {}, timeout=30)
+                if r.status_code == 404:
+                    # Tenta variações do prefixo
+                    ep_clean = endpoint.lstrip("/")
+                    # Remove prefixos comuns e tenta de novo
+                    for strip in ["api/v1/integracao/","api/v1/","v1/integracao/","v1/"]:
+                        if ep_clean.startswith(strip):
+                            alt_ep = "/" + ep_clean[len(strip):]
+                            alt_url = f"{self._base_ativo}{alt_ep}"
+                            r2 = self.s.get(alt_url, params=params or {}, timeout=30)
+                            if r2.status_code != 404:
+                                print(f"  → usando endpoint alternativo: {alt_ep}")
+                                r2.raise_for_status()
+                                return r2.json()
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.Timeout:
@@ -166,9 +183,25 @@ class HubsoftAPI:
         return dados
 
     # ── CLIENTES ─────────────────────────────────────────────────────
+    CLIENTE_ENDPOINTS = [
+        "/api/v1/integracao/cliente",
+        "/api/v1/cliente",
+        "/cliente",
+    ]
+
     def get_clientes(self, status="ativo"):
         params = {} if status == "todos" else {"status": status}
-        dados  = self._paginar("/api/v1/integracao/cliente", params)
+        for ep in self.CLIENTE_ENDPOINTS:
+            try:
+                dados = self._paginar(ep, params)
+                if dados:
+                    break
+            except Exception as e:
+                if "404" in str(e) or "Not Found" in str(e):
+                    continue
+                raise
+        else:
+            return pd.DataFrame()
         if not dados:
             return pd.DataFrame()
         df = pd.json_normalize(dados)
@@ -186,6 +219,15 @@ class HubsoftAPI:
         return df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
 
     # ── COBRANÇAS ─────────────────────────────────────────────────────
+    # Endpoints alternativos de cobranças/faturas (tenta em ordem)
+    COBRANCA_ENDPOINTS = [
+        "/api/v1/integracao/financeiro/cobranca",
+        "/api/v1/integracao/financeiro/fatura",
+        "/api/v1/integracao/cliente/financeiro",
+        "/financeiro/cobranca",
+        "/financeiro/fatura",
+    ]
+
     def get_cobrancas(self, data_ini, data_fim,
                       tipo_data="vencimento", pago=None):
         params = {
@@ -194,10 +236,31 @@ class HubsoftAPI:
         }
         if pago is not None:
             params["pago"] = int(pago)
-        dados = self._paginar("/api/v1/integracao/financeiro/cobranca", params)
-        if not dados:
-            return pd.DataFrame()
-        return self._norm_cobrancas(pd.json_normalize(dados))
+
+        # Tenta cada endpoint até achar um que funcione
+        last_err = None
+        for ep in self.COBRANCA_ENDPOINTS:
+            try:
+                dados = self._paginar(ep, params)
+                if dados:
+                    print(f"  ✅ Cobranças via: {ep} ({len(dados)} registros)")
+                    return self._norm_cobrancas(pd.json_normalize(dados))
+            except Exception as e:
+                last_err = e
+                if "404" in str(e) or "Not Found" in str(e):
+                    continue  # tenta próximo endpoint
+                raise  # outro erro — propaga
+
+        if last_err:
+            raise last_err
+        return pd.DataFrame()
+
+    FATURA_ENDPOINTS = [
+        "/api/v1/integracao/financeiro/fatura",
+        "/api/v1/integracao/financeiro/cobranca",
+        "/api/v1/integracao/cliente/financeiro",
+        "/financeiro/fatura",
+    ]
 
     def get_faturas(self, data_ini, data_fim, status_pag=None):
         params = {
@@ -206,17 +269,23 @@ class HubsoftAPI:
         }
         if status_pag:
             params["status_pagamento"] = status_pag
-        dados = self._paginar("/api/v1/integracao/financeiro/fatura", params)
-        if not dados:
-            return pd.DataFrame()
-        df = pd.json_normalize(dados)
-        for dc in ["data_vencimento","data_pagamento"]:
-            if dc in df.columns:
-                df[dc] = pd.to_datetime(df[dc], errors="coerce")
-        for vc in ["valor_total","valor_pago"]:
-            if vc in df.columns:
-                df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
-        return df
+        for ep in self.FATURA_ENDPOINTS:
+            try:
+                dados = self._paginar(ep, params)
+                if dados:
+                    df = pd.json_normalize(dados)
+                    for dc in ["data_vencimento","data_pagamento"]:
+                        if dc in df.columns:
+                            df[dc] = pd.to_datetime(df[dc], errors="coerce")
+                    for vc in ["valor_total","valor_pago"]:
+                        if vc in df.columns:
+                            df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
+                    return df
+            except Exception as e:
+                if "404" in str(e) or "Not Found" in str(e):
+                    continue
+                raise
+        return pd.DataFrame()
 
     # ── Normaliza cobranças ───────────────────────────────────────────
     @staticmethod
