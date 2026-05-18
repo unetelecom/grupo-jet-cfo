@@ -1,414 +1,341 @@
 """
-HUBSOFT API CONNECTOR — Grupo Jet Telecom
-Integração com a API oficial do Hubsoft para importar:
- - Clientes
- - Cobranças pagas
- - Cobranças em aberto (atrasadas + a vencer)
- - Faturas
-
+HUBSOFT API — Grupo Jet Telecom
+Auto-importação completa: clientes, cobranças pagas, abertas, atrasadas, a vencer.
 Documentação: https://docs.hubsoft.com.br
-Autenticação: OAuth2 (client_credentials)
 """
-
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional
+import calendar
+import time
 
 
-# ══════════════════════════════════════════════════════════════════════
-# CLIENTE HUBSOFT
+IC_NOMES = {"RDMI", "RRD TELECOM", "GRUPO JET", "JET TELECOM", "RD TELECOM"}
+
+
 # ══════════════════════════════════════════════════════════════════════
 class HubsoftAPI:
-    """
-    Cliente da API Hubsoft.
 
-    Uso:
-        hub = HubsoftAPI(
-            base_url  = "https://jettelecom.hubsoft.com.br",
-            client_id = "89",
-            client_secret = "ONe7Ns48Y30tB",
-            username  = "api@grupojet.com",
-            password  = "senha",
-        )
-        hub.autenticar()
-        clientes  = hub.get_clientes()
-        cobrancas = hub.get_cobrancas_periodo("2026-05-01", "2026-05-31")
-    """
-
-    def __init__(self, base_url: str, client_id: str, client_secret: str,
-                 username: str, password: str):
+    def __init__(self, base_url, client_id, client_secret, username, password):
         self.base_url      = base_url.rstrip("/")
-        self.client_id     = client_id
+        self.client_id     = str(client_id)
         self.client_secret = client_secret
         self.username      = username
         self.password      = password
         self.token         = None
         self.token_expiry  = None
-        self.session       = requests.Session()
-        self.session.headers.update({
+        self.s             = requests.Session()
+        self.s.headers.update({
             "Content-Type": "application/json",
-            "Accept":       "application/json",
+            "Accept": "application/json",
         })
 
-    # ─── AUTENTICAÇÃO ────────────────────────────────────────────────
-    def autenticar(self) -> bool:
-        """OAuth2 client_credentials — obtém Bearer token."""
-        url = f"{self.base_url}/oauth/token"
-        payload = {
+    # ── Auth ──────────────────────────────────────────────────────────
+    def autenticar(self):
+        url  = f"{self.base_url}/oauth/token"
+        body = {
             "grant_type":    "password",
             "client_id":     self.client_id,
             "client_secret": self.client_secret,
             "username":      self.username,
             "password":      self.password,
         }
-        try:
-            r = self.session.post(url, json=payload, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            self.token = data.get("access_token") or data.get("token")
-            expires_in = data.get("expires_in", 3600)
-            self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
-            self.session.headers["Authorization"] = f"Bearer {self.token}"
-            return True
-        except Exception as e:
-            raise ConnectionError(f"Falha na autenticação Hubsoft: {e}")
+        r = self.s.post(url, json=body, timeout=30)
+        if r.status_code != 200:
+            raise ConnectionError(
+                f"Hubsoft auth falhou ({r.status_code}): {r.text[:200]}"
+            )
+        data = r.json()
+        self.token = data.get("access_token") or data.get("token")
+        if not self.token:
+            raise ConnectionError(f"Token não encontrado na resposta: {data}")
+        exp = data.get("expires_in", 3600)
+        self.token_expiry = datetime.now() + timedelta(seconds=exp - 60)
+        self.s.headers["Authorization"] = f"Bearer {self.token}"
+        return self.token
 
-    def _garantir_token(self):
-        """Renova o token se expirado."""
-        if not self.token or (self.token_expiry and datetime.now() >= self.token_expiry):
+    def _ok_token(self):
+        if not self.token or datetime.now() >= (self.token_expiry or datetime.min):
             self.autenticar()
 
-    # ─── REQUEST GENÉRICO ────────────────────────────────────────────
-    def _get(self, endpoint: str, params: dict = None) -> dict:
-        self._garantir_token()
+    # ── GET com retry ─────────────────────────────────────────────────
+    def _get(self, endpoint, params=None, tentativas=3):
+        self._ok_token()
         url = f"{self.base_url}{endpoint}"
-        r = self.session.get(url, params=params or {}, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        for t in range(tentativas):
+            try:
+                r = self.s.get(url, params=params or {}, timeout=30)
+                if r.status_code == 401:
+                    self.autenticar()
+                    r = self.s.get(url, params=params or {}, timeout=30)
+                r.raise_for_status()
+                return r.json()
+            except requests.exceptions.Timeout:
+                if t == tentativas - 1:
+                    raise
+                time.sleep(2)
 
-    def _get_paginado(self, endpoint: str, params: dict = None,
-                      max_paginas: int = 50) -> list:
-        """Percorre todas as páginas e retorna lista consolidada."""
-        dados = []
+    # ── Paginação automática ──────────────────────────────────────────
+    def _paginar(self, endpoint, params=None, limit=100, max_pag=200):
         p = dict(params or {})
-        p.setdefault("pagina", 0)
-        p.setdefault("limit",  100)
-
-        for _ in range(max_paginas):
+        p["pagina"] = 0
+        p["limit"]  = limit
+        dados = []
+        for _ in range(max_pag):
             resp = self._get(endpoint, p)
-            registros = resp.get("dados") or resp.get("data") or resp.get("clientes") or []
-            if isinstance(registros, list):
-                dados.extend(registros)
-            elif isinstance(registros, dict):
-                dados.append(registros)
-
+            bloco = (resp.get("dados") or resp.get("data") or
+                     resp.get("clientes") or resp.get("contratos") or [])
+            if isinstance(bloco, list):
+                dados.extend(bloco)
+            elif isinstance(bloco, dict):
+                dados.append(bloco)
             pag = resp.get("paginacao") or {}
-            ultima = pag.get("ultima_pagina", 0)
-            atual  = pag.get("pagina_atual",  p["pagina"])
-            if atual >= ultima:
+            ultima  = pag.get("ultima_pagina", 0)
+            atual   = pag.get("pagina_atual",  p["pagina"])
+            if not bloco or atual >= ultima:
                 break
             p["pagina"] = atual + 1
-
         return dados
 
     # ══════════════════════════════════════════════════════════════════
     # CLIENTES
     # ══════════════════════════════════════════════════════════════════
-    def get_clientes(self, status: str = "ativo") -> pd.DataFrame:
-        """
-        Lista todos os clientes.
-        status: 'ativo' | 'inativo' | 'todos'
-        """
+    def get_clientes(self, status="ativo"):
         params = {}
         if status != "todos":
             params["status"] = status
-
-        dados = self._get_paginado(
-            "/api/v1/integracao/cliente",
-            params=params
-        )
-
+        dados = self._paginar("/api/v1/integracao/cliente", params)
         if not dados:
             return pd.DataFrame()
-
         df = pd.json_normalize(dados)
-
-        # Padroniza colunas úteis
         rename = {
-            "id":                     "id_cliente",
-            "nome_razaosocial":       "nome",
-            "cpf_cnpj":               "cpf_cnpj",
-            "email":                  "email",
-            "telefone":               "telefone",
-            "status":                 "status",
-            "data_cadastro":          "data_cadastro",
-            "endereco.cidade":        "cidade",
-            "endereco.estado":        "estado",
+            "id":                   "id_cliente",
+            "nome_razaosocial":     "nome",
+            "cpf_cnpj":             "cpf_cnpj",
+            "email":                "email",
+            "telefone":             "telefone",
+            "status":               "status",
+            "data_cadastro":        "data_cadastro",
+            "endereco.cidade":      "cidade",
+            "endereco.estado":      "estado",
+            "endereco.bairro":      "bairro",
         }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        return df
+        return df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
     # ══════════════════════════════════════════════════════════════════
     # COBRANÇAS
     # ══════════════════════════════════════════════════════════════════
-    def get_cobrancas_periodo(self, data_ini: str, data_fim: str,
-                              status: str = None) -> pd.DataFrame:
+    def get_cobrancas(self, data_ini, data_fim, tipo_data="vencimento",
+                      status=None, pago=None):
         """
-        Cobranças por período de vencimento.
-        status: None=todos | 'aberto' | 'pago' | 'atrasado'
-        data_ini / data_fim: 'YYYY-MM-DD'
+        tipo_data: 'vencimento' | 'pagamento' | 'lancamento'
+        status:    None | 'aberto' | 'pago'
+        pago:      None | 1 (pagas) | 0 (não pagas)
         """
+        params = {
+            f"data_{tipo_data}_ini": data_ini,
+            f"data_{tipo_data}_fim": data_fim,
+        }
+        if status:  params["status"] = status
+        if pago is not None: params["pago"] = pago
+
+        dados = self._paginar(
+            "/api/v1/integracao/financeiro/cobranca", params
+        )
+        if not dados:
+            return pd.DataFrame()
+        df = pd.json_normalize(dados)
+        return self._norm_cobrancas(df)
+
+    def get_faturas(self, data_ini, data_fim, status_pag=None):
         params = {
             "data_vencimento_ini": data_ini,
             "data_vencimento_fim": data_fim,
         }
-        if status:
-            params["status"] = status
-
-        dados = self._get_paginado(
-            "/api/v1/integracao/financeiro/cobranca",
-            params=params
-        )
-
+        if status_pag:
+            params["status_pagamento"] = status_pag
+        dados = self._paginar("/api/v1/integracao/financeiro/fatura", params)
         if not dados:
             return pd.DataFrame()
+        return pd.json_normalize(dados)
 
-        df = pd.json_normalize(dados)
-        return self._normalizar_cobrancas(df)
-
-    def get_cobrancas_pagas(self, data_ini: str, data_fim: str) -> pd.DataFrame:
-        """Cobranças pagas no período."""
-        return self.get_cobrancas_periodo(data_ini, data_fim, status="pago")
-
-    def get_cobrancas_abertas(self) -> pd.DataFrame:
-        """Cobranças em aberto (atrasadas + a vencer)."""
-        hoje = datetime.now()
-        data_ini = (hoje - timedelta(days=365)).strftime("%Y-%m-%d")
-        data_fim = (hoje + timedelta(days=90)).strftime("%Y-%m-%d")
-
-        # Busca atrasadas e a vencer separadamente
-        params_base = {
-            "data_vencimento_ini": data_ini,
-            "data_vencimento_fim": data_fim,
-        }
-        dados = self._get_paginado(
-            "/api/v1/integracao/financeiro/cobranca",
-            params={**params_base, "status": "aberto"}
-        )
-        if not dados:
-            return pd.DataFrame()
-        df = pd.json_normalize(dados)
-        return self._normalizar_cobrancas(df)
-
-    def get_cobrancas_atrasadas(self) -> pd.DataFrame:
-        """Cobranças vencidas e não pagas."""
-        df = self.get_cobrancas_abertas()
-        if df.empty:
-            return df
-        hoje = pd.Timestamp.now().normalize()
-        return df[df["data_vencimento"] < hoje].copy()
-
-    def get_cobrancas_a_vencer(self, dias: int = 30) -> pd.DataFrame:
-        """Cobranças que vencem nos próximos N dias."""
-        df = self.get_cobrancas_abertas()
-        if df.empty:
-            return df
-        hoje  = pd.Timestamp.now().normalize()
-        limit = hoje + pd.Timedelta(days=dias)
-        return df[(df["data_vencimento"] >= hoje) & (df["data_vencimento"] <= limit)].copy()
-
-    # ══════════════════════════════════════════════════════════════════
-    # FATURAS
-    # ══════════════════════════════════════════════════════════════════
-    def get_faturas_periodo(self, data_ini: str, data_fim: str,
-                            status_pagamento: str = None) -> pd.DataFrame:
-        """
-        Faturas por período.
-        status_pagamento: None=todas | 'pago' | 'aberto'
-        """
-        params = {
-            "data_vencimento_ini": data_ini,
-            "data_vencimento_fim": data_fim,
-        }
-        if status_pagamento:
-            params["status_pagamento"] = status_pagamento
-
-        dados = self._get_paginado(
-            "/api/v1/integracao/financeiro/fatura",
-            params=params
-        )
-
-        if not dados:
-            return pd.DataFrame()
-
-        df = pd.json_normalize(dados)
-        return self._normalizar_faturas(df)
-
-    # ══════════════════════════════════════════════════════════════════
-    # NORMALIZADORES
-    # ══════════════════════════════════════════════════════════════════
+    # ── Normaliza cobranças ───────────────────────────────────────────
     @staticmethod
-    def _normalizar_cobrancas(df: pd.DataFrame) -> pd.DataFrame:
-        """Padroniza o DataFrame de cobranças."""
+    def _norm_cobrancas(df):
         if df.empty:
             return df
-
         today = pd.Timestamp.now().normalize()
-
-        # Renomeia campos comuns da API Hubsoft
         rename = {
             "id":                           "id_cobranca",
             "id_cliente":                   "id_cliente",
             "nome_razaosocial":             "nome_cliente",
             "cliente.nome_razaosocial":     "nome_cliente",
+            "cliente.nome":                 "nome_cliente",
             "valor":                        "valor",
             "valor_pago":                   "valor_pago",
             "data_vencimento":              "data_vencimento",
             "data_pagamento":               "data_pagamento",
+            "data_lancamento":              "data_lancamento",
             "status":                       "status_raw",
             "descricao":                    "descricao",
             "servico":                      "servico",
+            "forma_pagamento":              "forma_pagamento",
         }
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-
-        # Garante colunas essenciais
-        for col in ["id_cobranca","nome_cliente","valor","data_vencimento","status_raw"]:
-            if col not in df.columns:
-                df[col] = None
-
-        # Parse de datas
-        for dcol in ["data_vencimento","data_pagamento"]:
-            if dcol in df.columns:
-                df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
-
-        # Parse de valores
-        for vcol in ["valor","valor_pago"]:
-            if vcol in df.columns:
-                df[vcol] = pd.to_numeric(df[vcol], errors="coerce").fillna(0).abs()
-
-        # Classificação de status
-        STATUS_PAGO = {"pago","baixado_banco","baixado_pix","baixado_manual",
-                       "baixado_parcial","quitado","recebido"}
-
-        def classif(row):
-            s = str(row.get("status_raw","")).lower()
-            if s in STATUS_PAGO: return "PAGO"
-            venc = row.get("data_vencimento")
-            if pd.notna(venc) and pd.Timestamp(venc) < today: return "ATRASADO"
+        # Garante colunas
+        for c in ["id_cobranca","nome_cliente","valor","data_vencimento","status_raw"]:
+            if c not in df.columns:
+                df[c] = None
+        # Datas
+        for dc in ["data_vencimento","data_pagamento","data_lancamento"]:
+            if dc in df.columns:
+                df[dc] = pd.to_datetime(df[dc], errors="coerce")
+        # Valores
+        for vc in ["valor","valor_pago"]:
+            if vc in df.columns:
+                df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
+        # Status normalizado
+        PAGO = {"pago","baixado_banco","baixado_pix","baixado_manual",
+                "baixado_parcial","quitado","recebido","baixado_faturamento"}
+        def _st(row):
+            s = str(row.get("status_raw","")).lower().strip()
+            if s in PAGO: return "PAGO"
+            if pd.notna(row.get("data_vencimento")) and \
+               pd.Timestamp(row["data_vencimento"]) < today: return "ATRASADO"
             return "A_VENCER"
-
-        df["status"] = df.apply(classif, axis=1)
-        df["dias_atraso"] = df["data_vencimento"].apply(
-            lambda d: max(0, (today - pd.Timestamp(d)).days) if pd.notna(d) else 0
-        )
-        df["valor_pendente"] = df.apply(
-            lambda r: 0.0 if r["status"]=="PAGO" else float(r.get("valor",0)),
-            axis=1
-        )
-
-        return df
-
-    @staticmethod
-    def _normalizar_faturas(df: pd.DataFrame) -> pd.DataFrame:
-        """Padroniza o DataFrame de faturas."""
-        if df.empty: return df
-        rename = {
-            "id":                        "id_fatura",
-            "id_cliente":                "id_cliente",
-            "nome_razaosocial":          "nome_cliente",
-            "cliente.nome_razaosocial":  "nome_cliente",
-            "valor_total":               "valor_total",
-            "valor_pago":                "valor_pago",
-            "data_vencimento":           "data_vencimento",
-            "data_pagamento":            "data_pagamento",
-            "status_pagamento":          "status",
-            "numero_fatura":             "numero_fatura",
-        }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        for dcol in ["data_vencimento","data_pagamento"]:
-            if dcol in df.columns:
-                df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
-        for vcol in ["valor_total","valor_pago"]:
-            if vcol in df.columns:
-                df[vcol] = pd.to_numeric(df[vcol], errors="coerce").fillna(0).abs()
-        return df
+        df["status"]       = df.apply(_st, axis=1)
+        df["dias_atraso"]  = df["data_vencimento"].apply(
+            lambda d: max(0, (today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
+        df["valor_pendente"]= df.apply(
+            lambda r: 0.0 if r["status"]=="PAGO" else float(r.get("valor",0)), axis=1)
+        # Remove intercompany
+        if "nome_cliente" in df.columns:
+            mask_ic = df["nome_cliente"].fillna("").str.upper().apply(
+                lambda n: any(ic in n for ic in IC_NOMES))
+            df = df[~mask_ic]
+        return df.reset_index(drop=True)
 
     # ══════════════════════════════════════════════════════════════════
-    # CONSOLIDADO FINANCEIRO (pré-processado para o app)
+    # TUDO EM UMA CHAMADA — para o app
     # ══════════════════════════════════════════════════════════════════
-    def get_financeiro_consolidado(self, mes: str = None) -> dict:
+    def importar_tudo(self, mes=None):
         """
-        Retorna tudo que o app precisa em uma chamada só.
-        mes: 'YYYY-MM' (default = mês atual)
+        Importa TODOS os dados necessários para o app:
+          - clientes
+          - cobranças do mês (pagas + abertas + atrasadas + a vencer)
+          - cobranças dos últimos 12 meses (para histórico de recebidos)
+        Retorna dict com DataFrames prontos para uso no app.
         """
         if not mes:
             mes = datetime.now().strftime("%Y-%m")
-        ano, m = mes.split("-")
-        import calendar
-        ultimo_dia = calendar.monthrange(int(ano), int(m))[1]
-        data_ini = f"{mes}-01"
-        data_fim = f"{mes}-{ultimo_dia:02d}"
+        ano, m = map(int, mes.split("-"))
+        ult_dia = calendar.monthrange(ano, m)[1]
+        d_ini   = f"{mes}-01"
+        d_fim   = f"{mes}-{ult_dia:02d}"
 
-        cobrancas = self.get_cobrancas_periodo(data_ini, data_fim)
+        # Cobranças do mês com vencimento
+        cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
 
-        if cobrancas.empty:
-            return {
-                "cobrancas": pd.DataFrame(),
-                "pagas": pd.DataFrame(),
-                "atrasadas": pd.DataFrame(),
-                "a_vencer": pd.DataFrame(),
-                "totais": {},
-            }
+        # Cobranças pagas no mês (por data de pagamento — captura pagamentos de meses anteriores)
+        cob_rec = self.get_cobrancas(d_ini, d_fim, tipo_data="pagamento", pago=1)
+
+        # Clientes ativos
+        try:
+            clientes = self.get_clientes("ativo")
+        except Exception:
+            clientes = pd.DataFrame()
 
         today = pd.Timestamp.now().normalize()
-        pagas    = cobrancas[cobrancas["status"]=="PAGO"]
-        atrasadas= cobrancas[cobrancas["status"]=="ATRASADO"]
-        a_vencer = cobrancas[cobrancas["status"]=="A_VENCER"]
+
+        # Separa cobranças do mês por status
+        if not cob_mes.empty:
+            pagas    = cob_mes[cob_mes["status"]=="PAGO"].copy()
+            atrasadas= cob_mes[cob_mes["status"]=="ATRASADO"].copy()
+            a_vencer = cob_mes[cob_mes["status"]=="A_VENCER"].copy()
+        else:
+            pagas = atrasadas = a_vencer = pd.DataFrame()
+
+        # Monta rec_df (faturamento) — equivalente à planilha Hubsoft
+        rec_df = cob_mes.copy() if not cob_mes.empty else pd.DataFrame()
+        if not rec_df.empty:
+            rec_df = rec_df.rename(columns={
+                "nome_cliente": "nome_razaosocial",
+                "id_cobranca":  "id_cobranca",
+            })
+            if "nome_razaosocial" not in rec_df.columns:
+                rec_df["nome_razaosocial"] = "Cliente"
+            rec_df["__val"]   = rec_df["valor"].fillna(0)
+            rec_df["__venc"]  = rec_df["data_vencimento"]
+            rec_df["__nome"]  = rec_df["nome_razaosocial"].fillna("").astype(str)
+            rec_df["__pago"]  = rec_df["status"] == "PAGO"
+            rec_df["__nome_c"]= rec_df["__nome"]
+
+        # Monta rec_df_recebidos — equivalente ao extrato OFX
+        # Usa cobranças pagas por data de pagamento (valor recebido real)
+        rec_recebidos = pd.DataFrame()
+        if not cob_rec.empty:
+            rec_recebidos = pd.DataFrame({
+                "__pagante": cob_rec.get("nome_cliente", pd.Series(dtype=str)).fillna("").astype(str),
+                "__val":     cob_rec["valor"].fillna(0),
+                "__data":    cob_rec.get("data_pagamento", pd.Series(dtype="datetime64[ns]")),
+                "__memo":    cob_rec.get("descricao", pd.Series(dtype=str)).fillna(""),
+            })
+            rec_recebidos = rec_recebidos[rec_recebidos["__val"] > 0]
+
+        # Totais
+        faturado   = float(rec_df["__val"].sum()) if not rec_df.empty else 0.0
+        recebido   = float(rec_recebidos["__val"].sum()) if not rec_recebidos.empty else 0.0
+        atrasado_v = float(atrasadas["valor"].sum()) if not atrasadas.empty else 0.0
+        a_vencer_v = float(a_vencer["valor"].sum()) if not a_vencer.empty else 0.0
 
         totais = {
-            "faturado":    float(cobrancas["valor"].sum()),
-            "recebido":    float(pagas["valor"].sum()),
-            "atrasado":    float(atrasadas["valor"].sum()),
-            "a_vencer":    float(a_vencer["valor"].sum()),
-            "n_cobrancas": len(cobrancas),
-            "n_pagas":     len(pagas),
-            "n_atrasadas": len(atrasadas),
-            "n_a_vencer":  len(a_vencer),
-            "adimplencia": round(len(pagas)/max(len(cobrancas),1)*100, 1),
+            "faturado":      faturado,
+            "recebido":      recebido,
+            "atrasado":      atrasado_v,
+            "a_vencer":      a_vencer_v,
+            "n_cobrancas":   len(rec_df),
+            "n_pagas":       len(pagas),
+            "n_atrasadas":   len(atrasadas),
+            "n_a_vencer":    len(a_vencer),
+            "adimplencia":   round(len(pagas)/max(len(rec_df),1)*100,1) if not rec_df.empty else 0.0,
+            "mes":           mes,
+            "fonte":         "hubsoft_api",
+            "atualizado_em": datetime.now().strftime("%d/%m/%Y %H:%M"),
         }
 
         return {
-            "cobrancas": cobrancas,
-            "pagas":     pagas,
-            "atrasadas": atrasadas,
-            "a_vencer":  a_vencer,
-            "totais":    totais,
+            # Para o app principal
+            "rec_df":          rec_df,          # faturamento (como planilha Hubsoft)
+            "rec_recebidos":   rec_recebidos,   # recebidos (como extrato)
+            # Extras
+            "clientes":        clientes,
+            "cob_mes":         cob_mes,
+            "pagas":           pagas,
+            "atrasadas":       atrasadas,
+            "a_vencer":        a_vencer,
+            "totais":          totais,
         }
 
     # ══════════════════════════════════════════════════════════════════
-    # CRUZAMENTO CLIENTE × COBRANÇAS
+    # CRUZAMENTO CLIENTE × FINANCEIRO
     # ══════════════════════════════════════════════════════════════════
-    def get_cruzamento_clientes(self, mes: str = None) -> pd.DataFrame:
-        """
-        Retorna DataFrame com cruzamento por cliente:
-        nome | faturado | recebido | atrasado | a_vencer | adimplencia%
-        """
-        fin = self.get_financeiro_consolidado(mes)
-        df  = fin.get("cobrancas", pd.DataFrame())
-        if df.empty:
+    def cruzamento_clientes(self, cob_df=None, mes=None):
+        if cob_df is None or cob_df.empty:
+            data = self.importar_tudo(mes)
+            cob_df = data["cob_mes"]
+        if cob_df.empty:
             return pd.DataFrame()
-
-        grp = df.groupby("nome_cliente").agg(
-            faturado  = ("valor",       "sum"),
-            recebido  = ("valor",       lambda x: x[df.loc[x.index,"status"]=="PAGO"].sum()),
-            atrasado  = ("valor",       lambda x: x[df.loc[x.index,"status"]=="ATRASADO"].sum()),
-            a_vencer  = ("valor",       lambda x: x[df.loc[x.index,"status"]=="A_VENCER"].sum()),
-            n_cob     = ("valor",       "count"),
-            n_pagas   = ("status",      lambda x: (x=="PAGO").sum()),
-            n_atr     = ("status",      lambda x: (x=="ATRASADO").sum()),
+        grp = cob_df.groupby("nome_cliente")
+        cli = grp.agg(
+            faturado   = ("valor",   "sum"),
+            recebido   = ("valor",   lambda x: x[cob_df.loc[x.index,"status"]=="PAGO"].sum()),
+            atrasado   = ("valor",   lambda x: x[cob_df.loc[x.index,"status"]=="ATRASADO"].sum()),
+            a_vencer   = ("valor",   lambda x: x[cob_df.loc[x.index,"status"]=="A_VENCER"].sum()),
+            n_cob      = ("valor",   "count"),
+            n_pagas    = ("status",  lambda x: (x=="PAGO").sum()),
+            n_atr      = ("status",  lambda x: (x=="ATRASADO").sum()),
+            n_av       = ("status",  lambda x: (x=="A_VENCER").sum()),
         ).reset_index()
-
-        grp["adimplencia_pct"] = (grp["recebido"] / grp["faturado"].replace(0,1) * 100).round(1)
-        return grp.sort_values("faturado", ascending=False)
+        cli["adimplencia_pct"] = (cli["recebido"]/cli["faturado"].replace(0,1)*100).round(1)
+        return cli.sort_values("faturado", ascending=False)
 
