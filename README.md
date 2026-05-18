@@ -1,74 +1,44 @@
 # CFO IA · Grupo Jet
-**Plataforma financeira inteligente com Diretor CFO IA (Maxwell)**
+> Plataforma financeira inteligente com Diretor CFO IA (Maxwell)
 
 ---
 
-## 🚀 Deploy no GitHub Pages — Passo a passo
+## 🚀 Deploy no Streamlit Cloud — Passo a passo
 
 ### 1. Criar repositório no GitHub
-1. Acesse [github.com](https://github.com) e faça login
-2. Clique em **"New repository"** (botão verde)
-3. Nome sugerido: `grupo-jet-cfo`
-4. Marque **"Public"** (necessário para GitHub Pages gratuito)
-5. Clique em **"Create repository"**
+1. Acesse [github.com](https://github.com) → **New repository**
+2. Nome: `grupo-jet-cfo` · Marque **Private** (recomendado) → **Create**
+3. Faça upload de **todos os arquivos** desta pasta:
+   - `app.py`
+   - `requirements.txt`
+   - `.streamlit/config.toml`
 
-### 2. Fazer upload do arquivo
-**Opção A — pelo navegador (mais fácil):**
-1. No repositório criado, clique em **"uploading an existing file"**
-2. Arraste o arquivo `index.html` para a área de upload
-3. Clique em **"Commit changes"**
+> ⚠️ **NÃO envie** o arquivo `secrets.toml.example` — ele contém informações sensíveis.
 
-**Opção B — via Git (terminal):**
-```bash
-git clone https://github.com/SEU_USUARIO/grupo-jet-cfo.git
-cd grupo-jet-cfo
-cp /caminho/index.html .
-git add index.html
-git commit -m "Adicionar plataforma CFO IA"
-git push
+### 2. Conectar ao Streamlit Cloud
+1. Acesse [share.streamlit.io](https://share.streamlit.io)
+2. Faça login com sua conta GitHub
+3. Clique em **"New app"**
+4. Selecione o repositório `grupo-jet-cfo`
+5. Branch: `main` · Main file: `app.py`
+6. Clique em **"Deploy!"**
+
+### 3. Configurar a chave da API (obrigatório para o CFO IA)
+1. No painel do Streamlit Cloud, clique na sua app
+2. Clique em **"⚙️ Settings"** → **"Secrets"**
+3. Cole o seguinte (com sua chave real):
+```toml
+ANTHROPIC_API_KEY = "sk-ant-SUA_CHAVE_AQUI"
 ```
+4. Clique em **Save** → o app reinicia automaticamente
 
-### 3. Ativar GitHub Pages
-1. No repositório, clique em **Settings** (engrenagem)
-2. No menu lateral, clique em **Pages**
-3. Em **"Source"**, selecione: **"Deploy from a branch"**
-4. Branch: **main** · Pasta: **/ (root)**
-5. Clique em **Save**
-6. Aguarde 1–2 minutos
+> A chave é obtida em [console.anthropic.com](https://console.anthropic.com) → API Keys
 
-### 4. Acessar a plataforma
+### 4. Acessar
 A URL será:
 ```
-https://SEU_USUARIO.github.io/grupo-jet-cfo/
+https://SEU_USUARIO-grupo-jet-cfo-app-XXXX.streamlit.app
 ```
-
----
-
-## 🔑 Configurar Chave da API Anthropic (obrigatório para o CFO IA)
-
-A plataforma usa a API da Anthropic para alimentar o Maxwell CFO.
-
-### Obter a chave
-1. Acesse [console.anthropic.com](https://console.anthropic.com)
-2. Vá em **API Keys** → **Create Key**
-3. Copie a chave (começa com `sk-ant-...`)
-
-### Inserir no código
-Abra o `index.html` e localize a linha:
-```javascript
-body:JSON.stringify({model:'claude-sonnet-4-20250514',...
-```
-
-Adicione o header de autorização:
-```javascript
-headers:{
-  'Content-Type':'application/json',
-  'x-api-key':'SUA_CHAVE_AQUI',
-  'anthropic-version':'2023-06-01'
-}
-```
-
-> ⚠️ **Atenção de segurança:** Para produção com dados reais, mova a chave para um backend (Node.js/PHP) para não expô-la no frontend.
 
 ---
 
@@ -77,20 +47,22 @@ headers:{
 | Módulo | Descrição |
 |--------|-----------|
 | 📊 Dashboard | KPIs, fluxo de caixa, alertas de prioridade |
-| 👥 Clientes | Carteira completa importada do Hubsoft |
-| 🏦 Extratos | Upload de PDF/CSV/OFX de BTG, Caixa, C6, Safra, BB |
-| 📥 Planilhas | Importação Excel do Hubsoft + Contas a Pagar |
-| 📋 Pagamentos | Scoring de prioridade de contas a pagar |
+| 👥 Clientes | Carteira importada do Hubsoft |
+| 🏦 Extratos | Upload CSV/XLSX de BTG, Caixa, C6, Safra, BB |
+| 📥 Planilhas | Importação Excel Hubsoft + Contas a Pagar |
+| 📋 Contas a Pagar | Scoring de prioridade |
 | 📈 Previsão | Projeção 12 meses com 3 cenários |
-| 🤝 Negociação | Contratos a renegociar e inadimplentes |
-| 🤖 CFO IA | Chat direto com Maxwell, diretor financeiro IA |
+| 🤝 Negociação | Contratos renegociáveis e inadimplentes |
+| 🤖 CFO IA | Chat com Maxwell, diretor financeiro IA |
 
 ---
 
-## 🔗 Integração Hubsoft
+## 🔐 Segurança
 
-Para conectar diretamente ao Hubsoft (sem exportar planilhas), é necessário um **proxy backend** para contornar o CORS. Exemplo em Node.js disponível sob demanda.
+- **Repositório privado** recomendado para dados internos
+- **Nunca** commite `secrets.toml` com chaves reais
+- Configure sempre via Streamlit Cloud → Settings → Secrets
 
 ---
 
-*Grupo Jet · Plataforma CFO IA · Desenvolvido com Claude AI*
+*Grupo Jet · Plataforma CFO IA · Powered by Claude AI*
