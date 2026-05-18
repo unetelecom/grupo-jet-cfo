@@ -537,6 +537,8 @@ def run_conciliacao(ofx_df, hub_df):
 
     # Apenas créditos do extrato (entradas = valor > 0)
     ofx_cred = ofx_df[ofx_df["valor"] > 0].copy() if "valor" in ofx_df.columns else pd.DataFrame()
+    if not ofx_cred.empty and "data" in ofx_cred.columns:
+        ofx_cred["data"] = pd.to_datetime(ofx_cred["data"], errors="coerce")
     if ofx_cred.empty: return pd.DataFrame()
 
     def _norm(s):
@@ -565,10 +567,15 @@ def run_conciliacao(ofx_df, hub_df):
             diff_pct = abs(vo - vh) / max(vh, 0.01)
             if diff_pct > 0.015: continue
 
-            # Match de data (±20 dias)
+            # Match de data (±20 dias) — robusto a tipos mistos
             dd = 999
-            if pd.notna(hub_row["_venc_c"]) and pd.notna(do):
-                dd = abs((do - hub_row["_venc_c"]).days)
+            try:
+                venc_c = hub_row["_venc_c"]
+                if pd.notna(venc_c) and pd.notna(do):
+                    diff = pd.Timestamp(do) - pd.Timestamp(venc_c)
+                    dd = abs(int(diff.total_seconds() / 86400))
+            except Exception:
+                dd = 999
             if dd > 20: continue
 
             # Match de nome
@@ -1366,7 +1373,11 @@ elif "Clientes" in page:
                     vh=hr["__v"]
                     if abs(vo-vh)/max(vh,0.01)>0.015: continue
                     dd=999
-                    if pd.notna(hr["__vc"]): dd=abs((do-hr["__vc"]).days)
+                    try:
+                        if pd.notna(hr["__vc"]) and pd.notna(do):
+                            diff2=pd.Timestamp(do)-pd.Timestamp(hr["__vc"])
+                            dd=abs(int(diff2.total_seconds()/86400))
+                    except: dd=999
                     if dd>25: continue
                     pw=_pw(hr["__n"]); nm=any(p in mo for p in pw) if pw else False
                     score=50+(15 if dd<=3 else 10 if dd<=7 else 5 if dd<=15 else 2)+(35 if nm else 0)
