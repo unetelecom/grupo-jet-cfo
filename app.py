@@ -2423,58 +2423,117 @@ with tab_hub:
         st.warning("⚠️ Módulo `hubsoft_api.py` não encontrado no repositório.")
         st.code("Coloque hubsoft_api.py no mesmo diretório do app.py", language="bash")
     else:
-        # Carrega credenciais do Secrets (prioridade) ou sidebar
-        def gs(k, d=""):
+        def _gs(k, d=""):
             try: return st.secrets.get(k, d)
             except: return d
 
-        hub_url    = gs("HUBSOFT_URL",           "https://jettelecom.hubsoft.com.br")
-        hub_cid    = gs("HUBSOFT_CLIENT_ID",     "147")
-        hub_csec   = gs("HUBSOFT_CLIENT_SECRET", "")
-        hub_user   = gs("HUBSOFT_USERNAME",      "")
-        hub_pass   = gs("HUBSOFT_PASSWORD",      "")
+        hub_url  = _gs("HUBSOFT_URL",           "https://jettelecom.hubsoft.com.br")
+        hub_cid  = _gs("HUBSOFT_CLIENT_ID",     "147")
+        hub_csec = _gs("HUBSOFT_CLIENT_SECRET", "")
+        hub_user = _gs("HUBSOFT_USERNAME",      "")
+        hub_pass = _gs("HUBSOFT_PASSWORD",      "")
 
-        credenciais_ok = all([hub_url, hub_cid, hub_csec, hub_user, hub_pass])
+        # Mostra erro de auto-load se existir
+        if st.session_state.get("hub_erro"):
+            st.error("❌ Erro na conexão com o Hubsoft:")
+            st.code(st.session_state["hub_erro"], language="text")
+            st.markdown("""
+**Possíveis causas e soluções:**
 
-        if not credenciais_ok:
-            with st.expander("⚙️ Configurar credenciais Hubsoft", expanded=True):
-                c1,c2 = st.columns(2)
+| Erro | Causa | Solução |
+|---|---|---|
+| `405 Not Allowed` | Formato de auth errado | Atualizar `hubsoft_api.py` |
+| `401 Unauthorized` | Credenciais inválidas | Verificar senha/client_secret |
+| `404 Not Found` | URL ou endpoint errado | Verificar `HUBSOFT_URL` |
+| `ConnectionError` | Servidor bloqueando IP | Contatar suporte Hubsoft |
+| `SSL Error` | Certificado inválido | Adicionar `verify=False` |
+""")
+
+        # Credenciais
+        cred_ok = all([hub_url, hub_cid, hub_csec, hub_user, hub_pass])
+        if not cred_ok:
+            with st.expander("⚙️ Configurar credenciais", expanded=True):
+                c1, c2 = st.columns(2)
                 with c1:
-                    hub_cid  = st.text_input("Client ID",   value="147",     key="hub_cid")
-                    hub_csec = st.text_input("Client Secret", value="",      key="hub_csec", type="password")
+                    hub_url  = st.text_input("URL", value=hub_url, key="h_url")
+                    hub_cid  = st.text_input("Client ID", value=hub_cid, key="h_cid")
+                    hub_csec = st.text_input("Client Secret", value="", type="password", key="h_csec")
                 with c2:
-                    hub_user = st.text_input("Usuário (e-mail)", value="",   key="hub_user")
-                    hub_pass = st.text_input("Senha",        value="",       key="hub_pass", type="password")
-                st.info("💡 Configure as credenciais nos **Secrets** do Streamlit Cloud para não precisar digitar.")
-            credenciais_ok = all([hub_cid, hub_csec, hub_user, hub_pass])
+                    hub_user = st.text_input("Usuário (e-mail)", value="", key="h_user")
+                    hub_pass = st.text_input("Senha", value="", type="password", key="h_pass")
+            cred_ok = all([hub_url, hub_cid, hub_csec, hub_user, hub_pass])
 
-        # Seletor de mês
         from datetime import datetime as _dt
-        hub_mes = st.text_input(
-            "📅 Mês a consultar (YYYY-MM):",
-            value=_dt.now().strftime("%Y-%m"),
-            key="hub_mes"
-        )
+        hub_mes = st.text_input("📅 Mês (YYYY-MM):",
+                                value=_dt.now().strftime("%Y-%m"), key="hub_mes")
 
-        if not credenciais_ok:
-            st.warning("Preencha as credenciais acima para acessar o Hubsoft.")
-        else:
-            btn_hub = st.button("🔄 Buscar dados do Hubsoft", type="primary", key="btn_hub")
+        hb1, hb2, hb3 = st.columns(3)
+        with hb1: btn_hub   = st.button("🔄 Buscar dados", type="primary", key="btn_hub")
+        with hb2: btn_diag  = st.button("🔍 Diagnóstico de conexão", key="btn_diag")
+        with hb3:
+            if st.button("🗑️ Limpar cache", key="btn_hub_clear"):
+                st.cache_data.clear()
+                for k in ["hub_erro","hub_dados"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
 
-            if btn_hub or st.session_state.get("hub_dados"):
-                @st.cache_data(ttl=300, show_spinner=False)
-                def _hub_fetch(url, cid, csec, user, pwd, mes):
-                    hub = HubsoftAPI(url, cid, csec, user, pwd)
-                    hub.autenticar()
-                    return hub.get_financeiro_consolidado(mes), hub.get_cruzamento_clientes(mes)
+        # DIAGNÓSTICO: testa cada endpoint
+        if btn_diag and cred_ok:
+            st.markdown("#### 🔍 Diagnóstico de Conexão")
+            import requests as _req
+            paths = ["/oauth/token","/api/oauth/token","/oauth/access-token","/api/v1/oauth/token"]
+            body  = {"grant_type":"password","client_id":hub_cid,"client_secret":hub_csec,
+                     "username":hub_user,"password":hub_pass}
+            rows  = []
+            token_achado = None
+            for path in paths:
+                url_t = f"{hub_url}{path}"
+                for ct, kw in [("form-urlencoded",{"data":body}),("json",{"json":body})]:
+                    try:
+                        r = _req.post(url_t, headers={"Content-Type":
+                            "application/x-www-form-urlencoded" if ct=="form-urlencoded"
+                            else "application/json","Accept":"application/json"},
+                            timeout=15, **kw)
+                        status = r.status_code
+                        msg    = r.text[:80].replace(chr(10)," ")
+                        ok     = status in (200,201) and "access_token" in r.text
+                        if ok and not token_achado:
+                            token_achado = (path, ct, r.json().get("access_token","")[:20])
+                        rows.append({"Endpoint":path,"Content-Type":ct,
+                                     "Status":status,"✅":ok,"Resposta":msg})
+                    except Exception as e:
+                        rows.append({"Endpoint":path,"Content-Type":ct,
+                                     "Status":"Erro","✅":False,"Resposta":str(e)[:80]})
+            import pandas as _pd2
+            st.dataframe(_pd2.DataFrame(rows), use_container_width=True, hide_index=True)
+            if token_achado:
+                st.success(f"✅ Token obtido via **{token_achado[0]}** com **{token_achado[1]}**")
+                st.info(f"Token (início): `{token_achado[2]}...`")
+            else:
+                st.error("❌ Nenhum endpoint retornou token válido")
+
+        if not cred_ok:
+            st.warning("Preencha as credenciais acima.")
+        elif btn_hub or st.session_state.get("hub_dados"):
+            @st.cache_data(ttl=300, show_spinner=False)
+            def _hub_fetch(url, cid, csec, user, pwd, mes):
+                hub = HubsoftAPI(url, cid, csec, user, pwd)
+                hub.autenticar()
+                return hub.importar_tudo(mes), hub.cruzamento_clientes(mes=mes)
 
                 with st.spinner("🔄 Conectando ao Hubsoft..."):
                     try:
-                        fin, cli_df = _hub_fetch(hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes)
+                        _hub_resultado, cli_df = _hub_fetch(
+                            hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes
+                        )
                         st.session_state["hub_dados"] = True
+                        st.session_state.pop("hub_erro", None)
                         st.success(f"✅ Hubsoft conectado — {hub_mes}")
+                        fin = _hub_resultado  # importar_tudo retorna dict
                     except Exception as e:
                         st.error(f"❌ Erro: {e}")
+                        st.code(str(e), language="text")
+                        st.session_state["hub_erro"] = str(e)
                         fin, cli_df = {}, pd.DataFrame()
 
                 totais = fin.get("totais", {})
