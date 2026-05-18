@@ -1219,9 +1219,14 @@ if _HAS_HUB:
             _hub_totais  = _hub_data["totais"]
         except Exception as _hub_err:
             _err_msg = str(_hub_err)
-            # Mostra erro detalhado na aba Hubsoft, aviso curto na sidebar
             st.session_state["hub_erro"] = _err_msg
-            st.sidebar.error(f"🔗 Hubsoft: erro de conexão — ver aba 🔗")
+            st.sidebar.error(f"🔗 Hubsoft: erro — ver logs")
+            # Log completo para o Streamlit Cloud logs
+            import traceback as _tb
+            print("=== HUBSOFT ERROR ===")
+            print(_err_msg)
+            print(_tb.format_exc())
+            print("====================")
             _hub_auto_ok = False
 
 data_ini_ts = pd.Timestamp(data_ini_input)
@@ -1286,7 +1291,19 @@ if pag_df.empty:
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.info("👈 **Comece importando a planilha de Contas a Pagar** na barra lateral.")
+    # Mostra erro Hubsoft na tela inicial se existir
+    if st.session_state.get("hub_erro"):
+        with st.expander("🔗 Erro Hubsoft — clique para ver detalhes", expanded=True):
+            st.error("❌ Falha na conexão com o Hubsoft:")
+            st.code(st.session_state["hub_erro"], language="text")
+            st.markdown("""
+**Como resolver:**
+1. Vá em **Manage app → Logs** para ver o erro completo
+2. Verifique os **Secrets** — a URL deve ser `https://api.jettelecom.hubsoft.com.br`
+3. A senha pode ter sido alterada após o vazamento no GitHub
+            """)
+    else:
+        st.info("👈 **Comece importando a planilha de Contas a Pagar** na barra lateral.")
     st.stop()
 
 # ══════════════════════════════════════════════════════════════════════
