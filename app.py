@@ -657,8 +657,11 @@ def agendar_inteligente(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
     # ── Saldo dia a dia real (com agendamentos) ──
     saldo_real = float(caixa_inicial)
     timeline = []
-    for d_k in sorted(set(list(dias_agenda.keys()) | set(
-            [data_ini + pd.Timedelta(days=i) for i in range(dias_horizonte)]))):
+    todos_os_dias = set(dias_agenda.keys()) | {
+        (data_ini + pd.Timedelta(days=i)).normalize()
+        for i in range(dias_horizonte)
+    }
+    for d_k in sorted(todos_os_dias):
         ent  = entradas_totais.get(d_k.normalize(), 0.0)
         pags = dias_agenda.get(d_k, [])
         total_pago = sum(p["val"] for p in pags)
