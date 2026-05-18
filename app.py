@@ -390,6 +390,81 @@ def parse_receber(uploaded) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# PARSER — CONTAS JÁ RECEBIDAS (extrato OFX ou planilha manual)
+# ══════════════════════════════════════════════════════════════════════
+def parse_recebidos(uploaded) -> pd.DataFrame:
+    """
+    Lê planilha/extrato com valores já efetivamente recebidos.
+    Aceita:
+      - Planilha xlsx/csv com colunas: cliente/pagante, valor, data
+      - Arquivo OFX (extrato bancário)
+    Retorna DataFrame com __pagante, __val, __data, __memo
+    """
+    import re as _re
+
+    name = uploaded.name.lower()
+
+    # ── OFX: extrato bancário ──
+    if name.endswith(".ofx") or name.endswith(".txt"):
+        raw = ""
+        for enc in ["latin-1","cp1252","utf-8"]:
+            try:
+                uploaded.seek(0)
+                raw = uploaded.read().decode(enc)
+                break
+            except: pass
+        if not raw: return pd.DataFrame()
+
+        trns = _re.findall(r"<STMTTRN>(.*?)</STMTTRN>", raw, _re.DOTALL | _re.IGNORECASE)
+        rows = []
+        for trn in trns:
+            def g(t):
+                pat = "<" + t + ">" + r"\s*(.*?)(?:\n|<|$)"
+                m = _re.search(pat, trn, _re.IGNORECASE)
+                return m.group(1).strip() if m else ""
+            try:
+                val = float(g("TRNAMT").replace(",","."))
+                if val <= 0: continue          # só entradas (créditos)
+                dt  = g("DTPOSTED")[:8]
+                mem = g("MEMO").strip()[:80]
+                data_str = f"{dt[6:8]}/{dt[4:6]}/{dt[:4]}" if len(dt)>=8 else ""
+                rows.append({
+                    "__pagante": mem,
+                    "__val":     abs(val),
+                    "__data":    pd.to_datetime(data_str, dayfirst=True, errors="coerce"),
+                    "__memo":    mem,
+                })
+            except: pass
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    # ── XLSX / CSV: planilha manual ──
+    try:
+        if name.endswith(".csv"):
+            for enc in ["utf-8","latin-1","cp1252"]:
+                try: df = pd.read_csv(uploaded, dtype=str, encoding=enc); break
+                except: uploaded.seek(0)
+        else:
+            df = pd.read_excel(uploaded, dtype=str)
+    except Exception as e:
+        st.error(f"Erro ao ler arquivo: {e}"); return pd.DataFrame()
+
+    if df.empty: return pd.DataFrame()
+
+    col_pag  = dcol(df,"pagante","cliente","nome","razao","pagador","payer","description","memo","descricao")
+    col_val  = dcol(df,"valor","value","amount","recebido","credito","entrada")
+    col_data = dcol(df,"data","date","data_pagamento","datapagamento","dt","when")
+
+    if not col_val: return pd.DataFrame()
+
+    df["__pagante"] = df[col_pag].fillna("").astype(str).str.strip() if col_pag else "Não identificado"
+    df["__val"]     = df[col_val].apply(pv)
+    df["__data"]    = parse_date(df[col_data]) if col_data else pd.NaT
+    df["__memo"]    = df["__pagante"]
+
+    return df[df["__val"] > 0].copy()
+
+
+# ══════════════════════════════════════════════════════════════════════
 # ALGORITMO DE AGENDA
 # ══════════════════════════════════════════════════════════════════════
 def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
@@ -586,6 +661,13 @@ with st.sidebar:
         help="Planilha Hubsoft com nome_razaosocial, valor, data_vencimento"
     )
 
+    up_recebidos = st.file_uploader(
+        "✅ Já Recebidos (xlsx/csv/ofx)",
+        type=["xlsx","xls","csv","ofx","txt"],
+        key="up_recebidos",
+        help="Extrato bancário OFX ou planilha com pagamentos já recebidos"
+    )
+
     st.markdown("---")
     st.markdown("### ⚙️ Parâmetros")
 
@@ -627,6 +709,11 @@ if up_pagar:
 if up_receber:
     with st.spinner("Lendo planilha de recebimentos..."):
         rec_df = parse_receber(up_receber)
+
+rec_df_recebidos = pd.DataFrame()
+if up_recebidos:
+    with st.spinner("Lendo pagamentos já recebidos..."):
+        rec_df_recebidos = parse_recebidos(up_recebidos)
 
 data_ini_ts = pd.Timestamp(data_ini_input)
 
@@ -686,14 +773,17 @@ if pag_df.empty:
 # ══════════════════════════════════════════════════════════════════════
 # STATUS DAS PLANILHAS
 # ══════════════════════════════════════════════════════════════════════
-c1, c2 = st.columns(2)
-with c1:
+_scols = st.columns(3 if not rec_df_recebidos.empty else 2)
+with _scols[0]:
     st.success(f"✅ **Contas a Pagar** — {len(pag_df)} contas · {brl(pag_df['__apagar'].sum())}")
-with c2:
+with _scols[1]:
     if not rec_df.empty:
         st.success(f"✅ **Faturamento** — {len(rec_df)} cobranças · {brl(rec_df['__val'].sum())}")
     else:
         st.warning("⚠️ Planilha de faturamento não importada — entradas serão R$ 0")
+if len(_scols) > 2 and not rec_df_recebidos.empty:
+    with _scols[2]:
+        st.success(f"✅ **Já Recebidos** — {len(rec_df_recebidos)} pagtos · {brl(rec_df_recebidos['__val'].sum())}")
 
 # ══════════════════════════════════════════════════════════════════════
 # HEADER — título da agenda
@@ -859,13 +949,139 @@ st.markdown(f"""
 # TABS — as 3 abas restantes da planilha
 # ══════════════════════════════════════════════════════════════════════
 st.markdown("---")
-tab_agenda, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
+_n_rec = len(rec_df_recebidos) if not rec_df_recebidos.empty else 0
+_v_rec = rec_df_recebidos["__val"].sum() if not rec_df_recebidos.empty else 0.0
+tab_agenda, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
     "📅 Agenda Detalhada",
+    f"✅ Já Recebidos ({_n_rec}) — {brl(_v_rec)}",
     "📂 Por Categoria",
     f"📋 Lista Completa ({a['n_pend']})",
     f"⚠️ Não Cobertos ({a['n_nc']}) — {brl(a['total_nc'])}",
     "🤖 Maxwell CFO",
 ])
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB RECEBIDOS — JÁ RECEBIDOS
+# ══════════════════════════════════════════════════════════════════════
+with tab_recebidos:
+    st.markdown("### ✅ Contas Já Recebidas")
+
+    if rec_df_recebidos.empty:
+        st.info(
+            "📥 **Importe os pagamentos já recebidos** na barra lateral (campo "
+            "*✅ Já Recebidos*).\n\n"
+            "Formatos aceitos:\n"
+            "- **Extrato OFX** do banco (BTG, Itaú, BB, Sicoob…)\n"
+            "- **Planilha xlsx/csv** com colunas: `pagante`, `valor`, `data`"
+        )
+    else:
+        rdf = rec_df_recebidos.copy()
+        total_rec = float(rdf["__val"].sum())
+        n_rec     = len(rdf)
+
+        # ── KPIs ──
+        kr1, kr2, kr3, kr4 = st.columns(4)
+        kr1.metric("✅ Total recebido",   brl(total_rec), f"{n_rec} pagamentos")
+        kr2.metric("📋 Faturado (hub)",   brl(rec_df["__val"].sum() if not rec_df.empty else 0))
+        pct_rec = round(total_rec / max(rec_df["__val"].sum() if not rec_df.empty else 1, 1) * 100, 1)
+        kr3.metric("📊 Adimplência",      f"{pct_rec}%", "do faturado")
+        a_receber = max((rec_df["__val"].sum() if not rec_df.empty else 0) - total_rec, 0)
+        kr4.metric("🔵 Ainda a receber",  brl(a_receber))
+
+        st.markdown("---")
+
+        # ── Entrada manual adicional ──
+        with st.expander("➕ Registrar recebimento manualmente", expanded=False):
+            st.markdown("Adicione um pagamento avulso não constante no arquivo importado.")
+            c_m1, c_m2, c_m3, c_m4 = st.columns([3,2,2,1])
+            with c_m1: nome_man  = st.text_input("Pagante / Cliente", key="man_nome")
+            with c_m2: val_man   = st.number_input("Valor (R$)", min_value=0.01, step=100.0, format="%.2f", key="man_val")
+            with c_m3: data_man  = st.date_input("Data recebimento", key="man_data")
+            with c_m4:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("✚ Adicionar", key="btn_add_rec", use_container_width=True):
+                    if nome_man.strip() and val_man > 0:
+                        nova = pd.DataFrame([{
+                            "__pagante": nome_man.strip(),
+                            "__val":     float(val_man),
+                            "__data":    pd.Timestamp(data_man),
+                            "__memo":    nome_man.strip(),
+                        }])
+                        rec_df_recebidos = pd.concat([rec_df_recebidos, nova], ignore_index=True)
+                        rdf = rec_df_recebidos.copy()
+                        total_rec = float(rdf["__val"].sum())
+                        n_rec = len(rdf)
+                        st.success(f"✅ Recebimento de {brl(val_man)} de {nome_man} adicionado!")
+                        st.rerun()
+
+        st.markdown("---")
+
+        # ── Filtros ──
+        fb1, fb2, fb3 = st.columns([3,2,2])
+        with fb1: busca_r = st.text_input("🔍 Buscar pagante", key="busca_rec")
+        with fb2:
+            if rdf["__data"].notna().any():
+                datas_disp = sorted(rdf["__data"].dropna().dt.date.unique())
+                data_filt  = st.selectbox("📅 Filtrar data",
+                    ["Todas"] + [d.strftime("%d/%m/%Y") for d in datas_disp], key="data_rec")
+            else:
+                data_filt = "Todas"
+        with fb3:
+            ord_rec = st.selectbox("Ordenar por",
+                ["Valor ↓","Data ↓","Pagante ↑"], key="ord_rec")
+
+        rdf_show = rdf.copy()
+        if busca_r:
+            rdf_show = rdf_show[rdf_show["__pagante"].str.lower().str.contains(busca_r.lower(), na=False)]
+        if data_filt != "Todas":
+            rdf_show = rdf_show[rdf_show["__data"].dt.strftime("%d/%m/%Y") == data_filt]
+        if ord_rec == "Valor ↓":       rdf_show = rdf_show.sort_values("__val", ascending=False)
+        elif ord_rec == "Data ↓":      rdf_show = rdf_show.sort_values("__data", ascending=False)
+        elif ord_rec == "Pagante ↑":   rdf_show = rdf_show.sort_values("__pagante")
+
+        st.markdown(f"**{len(rdf_show)} pagamentos** · Total filtrado: **{brl(rdf_show['__val'].sum())}**")
+
+        # Tabela principal
+        disp_r = pd.DataFrame({
+            "#":        range(1, len(rdf_show)+1),
+            "Pagante":  rdf_show["__pagante"].str[:50],
+            "Valor":    rdf_show["__val"].apply(brl),
+            "Data":     rdf_show["__data"].apply(
+                            lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "—"),
+            "Descrição":rdf_show["__memo"].str[:60],
+        })
+        st.dataframe(disp_r, use_container_width=True, hide_index=True, height=420)
+
+        st.markdown("---")
+
+        # ── Resumo por data ──
+        if rdf["__data"].notna().any():
+            st.markdown("#### 📅 Recebimentos por Dia")
+            por_dia = (
+                rdf.groupby(rdf["__data"].dt.normalize())["__val"]
+                .agg(["sum","count"])
+                .reset_index()
+                .sort_values("__data", ascending=False)
+            )
+            por_dia.columns = ["Data","Total Recebido","Qtd Pagamentos"]
+            por_dia["Data"] = por_dia["Data"].dt.strftime("%d/%m/%Y")
+            por_dia["Total Recebido"] = por_dia["Total Recebido"].apply(brl)
+            st.dataframe(por_dia, use_container_width=True, hide_index=True, height=280)
+
+        # ── Top pagantes ──
+        st.markdown("#### 👥 Top Pagantes")
+        top_pag = (
+            rdf.groupby("__pagante")["__val"]
+            .sum()
+            .nlargest(15)
+            .reset_index()
+        )
+        top_pag.columns = ["Pagante","Total Recebido"]
+        top_pag["Total Recebido"] = top_pag["Total Recebido"].apply(brl)
+        top_pag["#"] = range(1, len(top_pag)+1)
+        st.dataframe(top_pag[["#","Pagante","Total Recebido"]],
+                     use_container_width=True, hide_index=True, height=min(38*len(top_pag)+42, 420))
+
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 1 — AGENDA DETALHADA
