@@ -74,6 +74,172 @@ def parse_ofx(raw: str) -> dict:
         "periodo": f"{fmt8(dt_start)} a {fmt8(dt_end)}",
         "top_ent": top_e, "top_sai": top_s, "cats": cats,
     }
+# ══════════════════════════════════════════════════════════
+# CRUZAMENTO UNIFICADO POR CLIENTE
+# ══════════════════════════════════════════════════════════
+def build_cliente_unificado(hub_df, pag_df=None, ofx_df=None):
+    """
+    Cruza Hubsoft + Contas a Pagar + Extrato por nome do cliente/fornecedor.
+    Retorna DataFrame com visão 360° por entidade.
+    """
+    import unicodedata, re as _re2
+    if hub_df is None or hub_df.empty:
+        return pd.DataFrame()
+
+    hoje = pd.Timestamp.now().normalize()
+
+    def _norm(s):
+        s = unicodedata.normalize("NFKD", str(s).upper())
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        for t in ["LTDA","S.A","S/A","ME","EIRELI","SA","SS","EPP","IND","COM",
+                  "SERV","DE","DA","DO","DOS","DAS","E","EM","OU","NA","NO"]:
+            s = _re2.sub(rf"\b{t}\b", "", s)
+        return _re2.sub(r"\s+", " ", s).strip()
+
+    def _palavras(s):
+        return {w for w in _norm(s).split() if len(w) > 3}
+
+    STATUS_REC = {"baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+        "baixado_faturamento","baixado_cheque","baixado_ted","pago","recebido","quitado"}
+
+    # ── Detecta colunas Hubsoft ──
+    col_nome  = dcol(hub_df,"nome","razaosocial","nome_razaosocial","cliente","name")
+    col_val   = dcol(hub_df,"valor","value","amount","mensalidade")
+    col_vpago = dcol(hub_df,"valor_pago","valorpago","paidamount")
+    col_venc  = dcol(hub_df,"data_vencimento","datavencimento","vencimento","duedate")
+    col_st    = dcol(hub_df,"status","situacao","estado")
+    col_serv  = dcol(hub_df,"servico","service","plano","produto")
+
+    if not col_nome or not col_val:
+        return pd.DataFrame()
+
+    hub = hub_df.copy()
+    hub["__nome"]  = hub[col_nome].fillna("").astype(str).str.strip()
+    hub["__val"]   = hub[col_val].apply(pv)
+    hub["__vpago"] = hub[col_vpago].apply(pv) if col_vpago else 0.0
+    hub["__venc"]  = pd.to_datetime(hub[col_venc], dayfirst=True, errors="coerce") if col_venc else pd.NaT
+    hub["__st"]    = hub[col_st].fillna("").astype(str).str.lower().str.strip() if col_st else ""
+    hub["__norm"]  = hub["__nome"].apply(_norm)
+    hub = hub[hub["__nome"].str.len() >= 2]
+
+    def _cat_hub(row):
+        s = row["__st"]
+        if s in STATUS_REC: return "recebido"
+        if any(x in s for x in ["vencido","inadimplente","atrasado"]): return "atrasado"
+        if pd.notna(row["__venc"]) and row["__venc"] < hoje: return "atrasado"
+        return "a_receber"
+
+    hub["__cat"] = hub.apply(_cat_hub, axis=1)
+
+    # ── Agrupa por cliente (Hubsoft) ──
+    def _agg_hub(g):
+        fat  = g["__val"].sum()
+        rec  = g.loc[g["__cat"]=="recebido","__vpago"].where(
+                   g["__vpago"] > 0, g["__val"]).sum()
+        ar   = g.loc[g["__cat"]=="a_receber","__val"].sum()
+        at   = g.loc[g["__cat"]=="atrasado","__val"].sum()
+        servs= ", ".join(sorted(set(g[col_serv].dropna().astype(str).str.split(" ").str[0].tolist()))[:3]) if col_serv else ""
+        n_fat= len(g)
+        n_at = (g["__cat"]=="atrasado").sum()
+        return pd.Series({"faturado":fat,"recebido":rec,"a_receber":ar,"atrasado":at,
+                          "n_faturas":n_fat,"n_atrasadas":n_at,"servicos":servs})
+
+    hub_cli = hub.groupby(["__nome","__norm"]).apply(_agg_hub).reset_index()
+    hub_cli.columns = ["nome","_norm","faturado","recebido","a_receber","atrasado",
+                       "n_faturas","n_atrasadas","servicos"]
+
+    # ── Agrupa por fornecedor (Contas a Pagar) ──
+    pag_cli = pd.DataFrame()
+    if pag_df is not None and not pag_df.empty:
+        col_pnom = dcol(pag_df,"razao_social","razaosocial","fornecedor","nome")
+        col_paliq= dcol(pag_df,"valor_liquido","valorliquido","liquido")
+        col_papag= dcol(pag_df,"valor_pago","valorpago")
+        col_papend=dcol(pag_df,"a_pagar","apagar","saldo")
+        col_pcat = dcol(pag_df,"categoria","category","tipo")
+
+        if col_pnom:
+            pag2 = pag_df.copy()
+            pag2["__nome"]  = pag2[col_pnom].fillna("").astype(str).str.strip()
+            pag2["__liq"]   = pag2[col_paliq].apply(pv) if col_paliq else pag2[col_pnom].apply(lambda _: 0.0)
+            pag2["__pago"]  = pag2[col_papag].apply(pv) if col_papag else 0.0
+            pag2["__apagar"]= pag2[col_papend].apply(pv) if col_papend else pag2["__liq"] - pag2["__pago"]
+            pag2["__cat"]   = pag2[col_pcat].fillna("").astype(str) if col_pcat else ""
+            pag2["__norm"]  = pag2["__nome"].apply(_norm)
+            pag2 = pag2[pag2["__nome"].str.len() >= 2]
+
+            pag_cli = pag2.groupby(["__nome","__norm"]).agg(
+                total_pagar=("__liq","sum"),
+                pago_pag=("__pago","sum"),
+                a_pagar=("__apagar","sum"),
+                n_contas=("__liq","count"),
+                categorias=("__cat",lambda x: ", ".join(sorted(set(x.dropna()))[:3]))
+            ).reset_index()
+            pag_cli.columns = ["nome_pag","_norm_pag",
+                               "total_pagar","pago_pag","a_pagar","n_contas","categorias"]
+
+    # ── Agrupa por pagador (Extrato OFX) ──
+    ofx_cli = pd.DataFrame()
+    if ofx_df is not None and not ofx_df.empty and "memo" in ofx_df.columns:
+        ofx2 = ofx_df[ofx_df.get("tipo","entrada")=="entrada"].copy() if "tipo" in ofx_df.columns else ofx_df[ofx_df["valor"]>0].copy()
+        ofx2["__norm"] = ofx2["memo"].apply(_norm)
+        ofx_cli = ofx2.groupby("__norm").agg(
+            val_extrato=("valor","sum"),
+            n_transacoes=("valor","count"),
+        ).reset_index()
+
+    # ── JUNTA TUDO (left join do hub como base) ──
+    result = hub_cli.copy()
+
+    # Match com pag_df por similitude de nome
+    if not pag_cli.empty:
+        result["total_pagar"] = 0.0
+        result["a_pagar"]     = 0.0
+        result["categorias"]  = ""
+        result["n_contas"]    = 0
+
+        for idx, row in result.iterrows():
+            pw = _palavras(row["nome"])
+            for _, pr in pag_cli.iterrows():
+                pp = _palavras(pr["nome_pag"])
+                if row["_norm"] == pr["_norm_pag"] or len(pw & pp) >= 2:
+                    result.at[idx,"total_pagar"] = pr["total_pagar"]
+                    result.at[idx,"a_pagar"]     = pr["a_pagar"]
+                    result.at[idx,"categorias"]  = pr["categorias"]
+                    result.at[idx,"n_contas"]    = pr["n_contas"]
+                    break
+
+    # Match com extrato OFX
+    if not ofx_cli.empty:
+        result["val_extrato"]   = 0.0
+        result["n_transacoes"]  = 0
+        for idx, row in result.iterrows():
+            rn = row["_norm"]
+            pw = _palavras(row["nome"])
+            for _, er in ofx_cli.iterrows():
+                ep = _palavras(er["__norm"])
+                if rn == er["__norm"] or len(pw & ep) >= 1:
+                    result.at[idx,"val_extrato"]  = er["val_extrato"]
+                    result.at[idx,"n_transacoes"] = er["n_transacoes"]
+                    break
+
+    # Adimplência por cliente
+    result["adimpl_pct"] = result.apply(
+        lambda r: round(r["recebido"]/r["faturado"]*100,1) if r["faturado"]>0 else 0.0, axis=1)
+
+    # Status consolidado
+    def _status_cli(row):
+        if row["atrasado"]  > 0: return "🔴 Inadimplente"
+        if row["a_receber"] > 0: return "🔵 Em aberto"
+        if row["faturado"]  > 0: return "✅ Em dia"
+        return "⚪ Sem cobranças"
+
+    result["status_cli"] = result.apply(_status_cli, axis=1)
+    result = result.sort_values(["atrasado","faturado"], ascending=[False,False])
+    result = result.drop(columns=["_norm"], errors="ignore")
+
+    return result
+
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -152,16 +318,22 @@ def _load_hub_conciliado():
 STAT_ZERO = dict(
     # Clientes
     n_clientes=0, n_ativos=0, n_inad=0, n_suspensos=0, n_cancelados=0,
-    # Financeiro Hubsoft (4 categorias principais)
-    fat_total=0.0,      # Total faturado (todas as faturas emitidas)
-    fat_recebido=0.0,   # Total efetivamente recebido/pago
-    fat_a_receber=0.0,  # A receber (não vencido)
-    fat_atrasado=0.0,   # Em atraso (vencido e não pago)
-    fat_inad=0.0,       # Valor inadimplente (legado)
-    fat_rec=0.0,        # Estimativa recebimento
-    n_fat_recebido=0,   # Qtd faturas pagas
-    n_fat_a_receber=0,  # Qtd faturas a receber
-    n_fat_atrasado=0,   # Qtd faturas atrasadas
+    # Financeiro Hubsoft (4 categorias)
+    fat_total=0.0,        # Total faturado (faturas emitidas)
+    fat_recebido=0.0,     # Recebido (confirmado Hubsoft + extrato)
+    fat_a_receber=0.0,    # A receber (não vencido)
+    fat_atrasado=0.0,     # Em atraso (vencido e não pago)
+    fat_inad=0.0,
+    fat_rec=0.0,
+    n_fat_recebido=0,
+    n_fat_a_receber=0,
+    n_fat_atrasado=0,
+    # Extrato bancário (fonte primária)
+    banco_entradas=0.0,   # Total entradas no banco
+    banco_saidas=0.0,     # Total saídas no banco
+    banco_saldo=0.0,      # Saldo atual
+    banco_sem_hub=0.0,    # Entradas no banco sem cobrança no Hubsoft
+    banco_n_sem_hub=0,    # Qtd entradas sem match
     # Contas a pagar
     pag_total=0.0, pag_vencidas=0.0, pag_avencer=0.0,
     n_pag=0, n_pag_venc=0, n_pag_avenc=0,
@@ -601,6 +773,15 @@ def recalc():
             S["adimplencia_pct"] = round(recebido  / faturado * 100, 1)
             S["inad_pct"]        = round(atrasado  / faturado * 100, 1)
             S["rec_pct"]         = S["adimplencia_pct"]
+
+        # ── Incorpora dados do extrato OFX se disponível ──
+        ofx_sess = _st.session_state.get("ofx_df")
+        if ofx_sess is not None and not ofx_sess.empty and "valor" in ofx_sess.columns:
+            ofx_ent = ofx_sess[ofx_sess["valor"] > 0] if "tipo" not in ofx_sess.columns else                       ofx_sess[ofx_sess["tipo"]=="entrada"]
+            ofx_sai = ofx_sess[ofx_sess["valor"] < 0] if "tipo" not in ofx_sess.columns else                       ofx_sess[ofx_sess["tipo"]=="saida"]
+            S["banco_entradas"] = float(ofx_ent["valor"].apply(pv).sum())
+            S["banco_saidas"]   = float(ofx_sai["valor"].apply(pv).sum())
+            S["banco_saldo"]    = float(_st.session_state.get("ofx_saldo", S["banco_entradas"] - S["banco_saidas"]))
 
         # Label visual para exibição
         _LABEL = {"recebido":"✅ Recebido","a_receber":"🔵 A Receber",
@@ -1070,50 +1251,282 @@ if "Dashboard" in page:
 # CLIENTES
 # ══════════════════════════════════════════════════════════
 elif "Clientes" in page:
-    st.markdown("## Clientes & Carteira")
+    st.markdown("## 👥 Clientes — Visão 360°")
     show_src()
+
     hub = st.session_state.hub_df
+    pag = st.session_state.pag_df
+    ofx = st.session_state.ofx_df
+
     if hub is None or hub.empty:
         st.info("📥 Importe a planilha Hubsoft em **Importar Planilhas**.")
         st.stop()
 
     s = st.session_state.stats
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Total",      s["n_clientes"])
-    c2.metric("Ativos",     s["n_ativos"])
-    c3.metric("Inad.",      s["n_inad"],       delta=f"{s['inad_pct']}%" if s["n_inad"] else None, delta_color="inverse")
-    c4.metric("Suspensos",  s["n_suspensos"])
-    c5.metric("Cancelados", s["n_cancelados"])
+    tem_ofx = ofx is not None and not ofx.empty
+    tem_pag = pag is not None and not pag.empty
 
-    f1,f2,f3 = st.columns([3,1,1])
-    with f1: busca = st.text_input("🔍 Buscar...", key="cs")
-    with f2: fst   = st.selectbox("Status", ["Todos","ativo","inadimplente","suspenso","cancelado"], key="cst")
-    with f3:
-        if st.button("🤖 Análise CFO", type="primary", use_container_width=True):
-            with st.spinner("Analisando..."):
-                resp = cfo("Analise a carteira de clientes. Destaque os 3 principais riscos e 3 ações imediatas.")
-            st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
+    # ── Painel: Extrato como referência principal ──
+    if tem_ofx:
+        st.markdown("### 🏦 Extrato Bancário — Referência Principal")
+        bk1,bk2,bk3,bk4 = st.columns(4)
+        bk1.metric("💰 Entradas no banco",   brl(s.get("banco_entradas",0)), "Fonte primária")
+        bk2.metric("📤 Saídas do banco",     brl(s.get("banco_saidas",0)))
+        bk3.metric("🏦 Saldo atual",         brl(s.get("banco_saldo",0)))
+        bk4.metric("❓ Recebido s/ registro", brl(s.get("banco_sem_hub",0)),
+                   f"{s.get('banco_n_sem_hub',0)} entradas", delta_color="off")
+        st.markdown("<hr style='margin:12px 0'>", unsafe_allow_html=True)
 
-    df_v = limpar(hub)
+    # ── KPIs Hubsoft ──
+    st.markdown("### 📋 Hubsoft — Cobranças")
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("📋 Faturado",  brl(s["fat_total"]),    f"{s['n_clientes']} clientes")
+    k2.metric("✅ Recebido",  brl(s["fat_recebido"]), f"{s['adimplencia_pct']}% adimplência")
+    k3.metric("🔵 A Receber", brl(s["fat_a_receber"]),f"{s['n_fat_a_receber']} faturas")
+    k4.metric("🔴 Atrasado",  brl(s["fat_atrasado"]), f"{s['inad_pct']}%", delta_color="inverse")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if cli_df is None or cli_df.empty:
+        st.warning("Não foi possível construir a visão por cliente.")
+        st.stop()
+
+    # ── Filtros ──
+    fb1, fb2, fb3 = st.columns([3,1,1])
+    with fb1:
+        busca = st.text_input("🔍 Buscar cliente...", key="cli_busca")
+    with fb2:
+        filt_st = st.selectbox("Status:", ["Todos","🔴 Inadimplente","🔵 Em aberto","✅ Em dia"], key="cli_st")
+    with fb3:
+        filt_ord = st.selectbox("Ordenar por:", ["Atrasado ↓","Faturado ↓","Recebido ↓","Nome ↑"], key="cli_ord")
+
+    df_show = cli_df.copy()
     if busca:
-        df_v = df_v[df_v.apply(lambda r: busca.lower() in " ".join(r.astype(str).str.lower()), axis=1)]
-    if fst != "Todos":
-        sc = dcol(hub,"status","situacao","estado")
-        if sc and sc in df_v.columns:
-            df_v = df_v[df_v[sc].astype(str).str.lower().str.contains(fst)]
+        df_show = df_show[df_show["nome"].str.lower().str.contains(busca.lower(), na=False)]
+    if filt_st != "Todos":
+        df_show = df_show[df_show["status_cli"] == filt_st]
+    ord_map = {"Atrasado ↓":"atrasado","Faturado ↓":"faturado","Recebido ↓":"recebido","Nome ↑":"nome"}
+    asc_map = {"Nome ↑":True}
+    df_show = df_show.sort_values(ord_map[filt_ord], ascending=asc_map.get(filt_ord, False))
 
-    st.markdown(f"**{len(df_v)} registros**")
-    st.dataframe(df_v, use_container_width=True, height=380, hide_index=True)
+    st.markdown(f"**{len(df_show)} clientes**  |  "
+        f"Faturado: **{brl(df_show['faturado'].sum())}**  |  "
+        f"Recebido: **{brl(df_show['recebido'].sum())}**  |  "
+        f"Atrasado: **{brl(df_show['atrasado'].sum())}**")
 
-    if "_st" in hub.columns:
-        grp = hub.groupby("_st").size().reset_index(name="n")
-        fig = go.Figure(go.Pie(labels=grp["_st"], values=grp["n"],
-            marker_colors=["#22A85A","#D93025","#D97706","#888"],
-            hole=0.6, textinfo="percent+label", textfont_size=11))
-        fig.update_layout(title="Distribuição por status (dados reais)",
-            height=200, margin=dict(t=30,b=0,l=0,r=0),
-            showlegend=False, paper_bgcolor="white")
-        st.plotly_chart(fig, use_container_width=True)
+    # ── Constrói visão unificada ──
+    with st.spinner("Cruzando extrato + Hubsoft + A Pagar por cliente..."):
+        cli_df = build_cliente_unificado(hub, pag, ofx)
+
+    # Tabs de visualização
+    tab_banco, tab_tabela, tab_inadim, tab_cruzado, tab_analise = st.tabs([
+        "🏦 Extrato × Clientes", "📋 Todos os Clientes", "🔴 Inadimplentes",
+        "🔄 Cliente × Fornecedor", "🤖 Análise CFO"
+    ])
+
+    # ── TAB EXTRATO × CLIENTES ──
+    with tab_banco:
+        if not tem_ofx:
+            st.info("📥 Para ver o cruzamento com extrato, analise um arquivo OFX em **Extratos Bancários**.")
+        else:
+            # Roda conciliação completa extrato × Hubsoft
+            import unicodedata as _uc2, re as _re2
+            def _normb(s):
+                s=_uc2.normalize("NFKD",str(s).upper())
+                s="".join(c for c in s if not _uc2.combining(c))
+                for t in ["LTDA","S.A","S/A","ME","EIRELI","SA"]:
+                    s=_re2.sub(rf"\b{t}\b","",s)
+                return _re2.sub(r"\s+"," ",s).strip()
+            def _pw(s): return {w for w in _normb(s).split() if len(w)>3}
+
+            STATUS_REC_B={"baixado_banco","baixado_pix","baixado_manual","baixado_parcial",
+                "baixado_faturamento","baixado_cheque","pago","recebido"}
+            col_nome_h =dcol(hub,"nome","razaosocial","nome_razaosocial","cliente")
+            col_val_h  =dcol(hub,"valor","value","mensalidade")
+            col_venc_h =dcol(hub,"data_vencimento","datavencimento","vencimento")
+            col_st_h   =dcol(hub,"status","situacao")
+            col_vp_h   =dcol(hub,"valor_pago","valorpago")
+
+            hub_c=hub.copy()
+            hub_c["__n"] =hub_c[col_nome_h].fillna("").astype(str).str.strip() if col_nome_h else ""
+            hub_c["__v"] =hub_c[col_val_h].apply(pv) if col_val_h else 0.0
+            hub_c["__vc"]=pd.to_datetime(hub_c[col_venc_h],dayfirst=True,errors="coerce") if col_venc_h else pd.NaT
+            hub_c["__st"]=hub_c[col_st_h].fillna("").astype(str).str.lower().str.strip() if col_st_h else ""
+            hub_c["__vp"]=hub_c[col_vp_h].apply(pv) if col_vp_h else 0.0
+            hub_pend_c=hub_c[(~hub_c["__st"].isin(STATUS_REC_B))&(hub_c["__v"]>0)]
+
+            ofx_c=ofx[ofx["valor"]>0].copy() if "tipo" not in ofx.columns else ofx[ofx["tipo"]=="entrada"].copy()
+            hoje_c=pd.Timestamp.now().normalize()
+
+            # Matching
+            cands_c=[]
+            for io,or_ in ofx_c.iterrows():
+                vo=or_["valor"]; do=or_["data"]; mo=_normb(or_.get("memo",""))
+                for ih,hr in hub_pend_c.iterrows():
+                    vh=hr["__v"]
+                    if abs(vo-vh)/max(vh,0.01)>0.015: continue
+                    dd=999
+                    if pd.notna(hr["__vc"]): dd=abs((do-hr["__vc"]).days)
+                    if dd>25: continue
+                    pw=_pw(hr["__n"]); nm=any(p in mo for p in pw) if pw else False
+                    score=50+(15 if dd<=3 else 10 if dd<=7 else 5 if dd<=15 else 2)+(35 if nm else 0)
+                    cands_c.append({"io":io,"ih":ih,"score":score,"dd":dd,"nm":nm,
+                        "nome":hr["__n"],"val_hub":vh,"val_ofx":vo,
+                        "data_ofx":do.strftime("%d/%m/%Y"),"memo":or_.get("memo","")[:60],
+                        "venc":str(hr["__vc"])[:10] if pd.notna(hr["__vc"]) else "—"})
+
+            used_o2=set(); used_h2=set(); m2=[]
+            if cands_c:
+                for _,c in pd.DataFrame(cands_c).sort_values("score",ascending=False).iterrows():
+                    if c["io"] not in used_o2 and c["ih"] not in used_h2:
+                        used_o2.add(c["io"]); used_h2.add(c["ih"]); m2.append(c)
+
+            mdf2=pd.DataFrame(m2) if m2 else pd.DataFrame()
+            matched_o=set(mdf2["io"].tolist()) if not mdf2.empty else set()
+            matched_h=set(mdf2["ih"].tolist()) if not mdf2.empty else set()
+            ofx_nc2=ofx_c[~ofx_c.index.isin(matched_o)]
+            hub_nc2=hub_pend_c[~hub_pend_c.index.isin(matched_h)]
+            hub_nc_at=hub_nc2[hub_nc2["__vc"]<hoje_c] if not hub_nc2.empty else pd.DataFrame()
+            hub_nc_ar=hub_nc2[hub_nc2["__vc"]>=hoje_c] if not hub_nc2.empty else pd.DataFrame()
+
+            # KPIs do cruzamento
+            col_r1,col_r2,col_r3,col_r4 = st.columns(4)
+            col_r1.metric("🏦 Entradas no banco",   brl(ofx_c["valor"].sum()),  f"{len(ofx_c)} transações")
+            col_r2.metric("✅ Conciliadas c/ Hubsoft",brl(mdf2["val_hub"].sum() if not mdf2.empty else 0), f"{len(mdf2)} cobranças")
+            col_r3.metric("❓ Entrada s/ registro",  brl(ofx_nc2["valor"].sum()),f"{len(ofx_nc2)} entradas")
+            col_r4.metric("🔴 Atrasado real",        brl(hub_nc_at["__v"].sum() if not hub_nc_at.empty else 0), f"{len(hub_nc_at)} cobranças")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            sub1, sub2, sub3 = st.tabs([
+                f"✅ Conciliadas ({len(mdf2)})",
+                f"❓ No banco s/ Hubsoft ({len(ofx_nc2)}) — R$ {brl(ofx_nc2['valor'].sum())}",
+                f"🔴 Hubsoft s/ entrada ({len(hub_nc_at)}) — R$ {brl(hub_nc_at['__v'].sum() if not hub_nc_at.empty else 0)}",
+            ])
+            with sub1:
+                if not mdf2.empty:
+                    conf_label = mdf2["score"].apply(lambda s: "🟢" if s>=85 else "🟡" if s>=65 else "🟠")
+                    d1=pd.DataFrame({"Conf.":conf_label,"Cliente":mdf2["nome"],
+                        "Valor Hub":mdf2["val_hub"].apply(brl),"Valor Banco":mdf2["val_ofx"].apply(brl),
+                        "Data Pgt":mdf2["data_ofx"],"Vencimento":mdf2["venc"],"Memo":mdf2["memo"]})
+                    st.dataframe(d1,use_container_width=True,height=340,hide_index=True)
+                    ca,cb = st.columns(2)
+                    with ca:
+                        if st.button("✅ Aplicar todas as baixas no Hubsoft",type="primary",use_container_width=True):
+                            hub_novo=hub.copy()
+                            for _,m in mdf2.iterrows():
+                                idx=int(m["ih"])
+                                if idx in hub_novo.index:
+                                    if col_st_h:  hub_novo.at[idx,col_st_h] ="baixado_banco"
+                                    if col_vp_h:  hub_novo.at[idx,col_vp_h] =str(m["val_ofx"])
+                            st.session_state.hub_df=hub_novo
+                            recalc()
+                            st.success(f"✅ {len(mdf2)} cobranças baixadas como baixado_banco!")
+                            st.rerun()
+                else:
+                    st.info("Nenhum match encontrado. Verifique se o extrato e a planilha são do mesmo período.")
+
+            with sub2:
+                st.markdown("**Entradas no banco que NÃO têm cobrança correspondente no Hubsoft.**")
+                st.markdown("*Possíveis causas: pagamento não cadastrado, cliente diferente, transferência interna (RDMI), devolução.*")
+                if not ofx_nc2.empty:
+                    d2=ofx_nc2[["data","valor","memo"]].copy()
+                    d2["data"]=d2["data"].dt.strftime("%d/%m/%Y")
+                    d2["valor"]=d2["valor"].apply(brl)
+                    d2.columns=["Data","Valor","Descrição do extrato"]
+                    st.dataframe(d2,use_container_width=True,height=340,hide_index=True)
+                    st.metric("Total não registrado",brl(ofx_nc2["valor"].sum()))
+
+            with sub3:
+                st.markdown("**Cobranças no Hubsoft VENCIDAS que NÃO têm entrada no banco.**")
+                st.markdown("*Estas são as inadimplências reais confirmadas pelo extrato.*")
+                if not hub_nc_at.empty:
+                    d3=hub_nc_at[["__n","__v","__vc","__st"]].copy()
+                    d3["__vc"]=d3["__vc"].dt.strftime("%d/%m/%Y")
+                    d3["__v"]=d3["__v"].apply(brl)
+                    d3["dias"]=(hoje_c-hub_nc_at["__vc"]).dt.days.fillna(0).astype(int)
+                    d3.columns=["Cliente","Valor","Vencimento","Status Hubsoft","Dias Atraso"]
+                    d3=d3.sort_values("Dias Atraso",ascending=False)
+                    st.dataframe(d3,use_container_width=True,height=340,hide_index=True)
+                    st.metric("Total inadimplente confirmado",brl(hub_nc_at["__v"].sum()))
+                else:
+                    st.success("✅ Nenhuma inadimplência confirmada com este extrato.")
+
+    with tab_tabela:
+        # Monta tabela formatada
+        disp = pd.DataFrame()
+        disp["👤 Cliente"]      = df_show["nome"]
+        disp["📊 Status"]       = df_show["status_cli"]
+        disp["📋 Faturado"]     = df_show["faturado"].apply(brl)
+        disp["✅ Recebido"]     = df_show["recebido"].apply(brl)
+        disp["🔵 A Receber"]    = df_show["a_receber"].apply(brl)
+        disp["🔴 Atrasado"]     = df_show["atrasado"].apply(brl)
+        disp["% Adimpl."]       = df_show["adimpl_pct"].apply(lambda x: f"{x:.1f}%")
+        disp["Nº Faturas"]      = df_show["n_faturas"]
+        if "a_pagar" in df_show.columns and df_show["a_pagar"].sum() > 0:
+            disp["💳 A Pagar (Forn.)"] = df_show["a_pagar"].apply(brl)
+        if "val_extrato" in df_show.columns and df_show["val_extrato"].sum() > 0:
+            disp["🏦 Extrato"]  = df_show["val_extrato"].apply(brl)
+        st.dataframe(disp, use_container_width=True, height=420, hide_index=True)
+
+    with tab_inadim:
+        inad_df = df_show[df_show["atrasado"] > 0].sort_values("atrasado", ascending=False)
+        if not inad_df.empty:
+            st.metric("Total em atraso", brl(inad_df["atrasado"].sum()),
+                      f"{len(inad_df)} clientes inadimplentes")
+            for _, r in inad_df.head(20).iterrows():
+                pct = round(r["atrasado"]/r["faturado"]*100,1) if r["faturado"]>0 else 0
+                col_a, col_b, col_c = st.columns([3, 1, 1])
+                with col_a:
+                    st.markdown(f"""
+                    <div style='padding:8px 0;border-bottom:1px solid #EEE'>
+                        <strong style='font-size:13px'>{r["nome"]}</strong>
+                        <span style='color:#6E6E6E;font-size:11px;margin-left:8px'>{r.get("servicos","")}</span>
+                    </div>""", unsafe_allow_html=True)
+                with col_b:
+                    st.markdown(f"<div style='padding:8px 0;text-align:right;color:#D93025;font-weight:700'>{brl(r['atrasado'])}</div>", unsafe_allow_html=True)
+                with col_c:
+                    st.markdown(f"<div style='padding:8px 0;text-align:right;color:#6E6E6E;font-size:11px'>{pct}% do fat.</div>", unsafe_allow_html=True)
+        else:
+            st.success("✅ Nenhum cliente inadimplente nos filtros selecionados.")
+
+    with tab_cruzado:
+        st.markdown("**Entidades que aparecem como cliente (A Receber) E como fornecedor (A Pagar)**")
+        if "a_pagar" in df_show.columns:
+            cruzados = df_show[df_show["a_pagar"] > 0].copy()
+            if not cruzados.empty:
+                st.markdown(f"*{len(cruzados)} entidades cruzadas encontradas*")
+                cr_disp = pd.DataFrame()
+                cr_disp["Entidade"]            = cruzados["nome"]
+                cr_disp["✅ Recebe de nós"]    = cruzados["faturado"].apply(brl)
+                cr_disp["🔴 Nos deve (atras.)"]= cruzados["atrasado"].apply(brl)
+                cr_disp["💳 Devemos a eles"]   = cruzados["a_pagar"].apply(brl)
+                cr_disp["Categorias (pagar)"]  = cruzados.get("categorias","")
+                cr_disp["Saldo líquido"]        = (cruzados["recebido"] - cruzados["a_pagar"]).apply(
+                    lambda v: f"✅ {brl(v)}" if v >= 0 else f"🔴 {brl(abs(v))}")
+                st.dataframe(cr_disp, use_container_width=True, height=300, hide_index=True)
+
+                saldo = (cruzados["recebido"] - cruzados["a_pagar"]).sum()
+                st.markdown(f"**Saldo líquido total:** {'✅ ' if saldo>=0 else '🔴 '}{brl(abs(saldo))}")
+            else:
+                st.info("Nenhuma entidade encontrada em ambas as planilhas com os filtros atuais.")
+        else:
+            st.info("Importe também a planilha **Contas a Pagar** em Importar Planilhas para ver o cruzamento.")
+
+    with tab_analise:
+        if st.button("🤖 Gerar análise CFO da carteira completa", type="primary", use_container_width=True):
+            with st.spinner("Maxwell analisando carteira..."):
+                top_inad = df_show[df_show["atrasado"]>0].nlargest(5,"atrasado")
+                top_str  = "; ".join(f"{r['nome'][:30]} (R${r['atrasado']:,.0f})" for _,r in top_inad.iterrows())
+                resp = cfo(
+                    f"Carteira de {s['n_clientes']} clientes. "
+                    f"Faturado {brl(s['fat_total'])} | Recebido {brl(s['fat_recebido'])} ({s['adimplencia_pct']}%) | "
+                    f"A Receber {brl(s['fat_a_receber'])} | Atrasado {brl(s['fat_atrasado'])} ({s['inad_pct']}%). "
+                    f"Top inadimplentes: {top_str}. "
+                    "Gere análise de risco por concentração de receita, estratégia de cobrança segmentada "
+                    "por faixa de valor, e recomendações para aumentar a taxa de adimplência.",
+                    max_tokens=1200
+                )
+            st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════
