@@ -160,7 +160,7 @@ for k, v in {
     "chat_history": [], "api_key": "",
     "data_src": "Sem dados importados",
     "last_update": None,
-    "hub_col_map": {}, "col_expanded": False, "hub_diag": {},
+    "hub_col_map": {}, "col_expanded": False, "hub_diag": {}, "pag_diag": {},
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -473,50 +473,114 @@ def recalc():
         st_session_rec  = pd.DataFrame()
         st_session_hub  = hub
 
-    # ── CONTAS A PAGAR ──
+    # ── CONTAS A PAGAR — leitura inteligente Hubsoft ──
     if pag is not None and not pag.empty:
-        srcs.append(f"Contas a Pagar ({len(pag)} reg.)")
         pag = pag.copy()
-        vc2 = dcol(pag,"vencimento","vencto","duedate","prazo","datavenc","venc")
-        vv  = dcol(pag,"valor","value","amount","total")
-        sc2 = dcol(pag,"status","situacao","pago","paid","estado")
 
-        pag["_val"] = pag[vv].apply(pv) if vv else 0.0
+        # ═══════════════════════════════════════════════════
+        # PASSO 1 — Detecta colunas (Hubsoft exporta com nomes específicos)
+        # ═══════════════════════════════════════════════════
+        col_forn    = dcol(pag,"razao_social","razaosocial","fornecedor","nome","supplier","name","beneficiario")
+        col_venc    = dcol(pag,"vencimento","data_vencimento","datavencimento","vencto","duedate","datavenc")
+        col_cat     = dcol(pag,"categoria","category","tipo","natureza","descricao","classe")
+        col_val     = dcol(pag,"valor_da_conta","valordaconta","valor_bruto","valorbruto","valor","value","amount","gross")
+        col_val_liq = dcol(pag,"valor_liquido","valorliquido","net","liquido","vlrliquido")
+        col_val_pago= dcol(pag,"valor_pago","valorpago","paidamount","vlpago")
+        col_a_pagar = dcol(pag,"a_pagar","apagar","saldo","pendente","outstanding","aberto","due")
 
-        def cls_pag(row):
-            if sc2:
-                s2 = str(row[sc2]).lower()
-                if any(x in s2 for x in ["pago","paid","liquidado","quitado","ok"]):
-                    return "pago"
-            if vc2:
-                try:
-                    d = pd.to_datetime(row[vc2], dayfirst=True)
-                    diff = (d - hoje).days
-                    if diff < 0:    return "vencida"
-                    elif diff == 0: return "vence hoje"
-                    elif diff <= 7: return "a vencer"
-                    else:           return "em dia"
-                except: return "—"
-            return "—"
+        # Evita conflito entre colunas de valor
+        if col_val_liq and col_val_liq == col_val:       col_val_liq = None
+        if col_val_pago and col_val_pago == col_val:     col_val_pago= None
+        if col_a_pagar and col_a_pagar in (col_val, col_val_liq): col_a_pagar = None
 
-        pag["_st_pag"] = pag.apply(cls_pag, axis=1)
-        if vc2:
-            pag["_venc_d"] = pd.to_datetime(pag[vc2], dayfirst=True, errors="coerce")
-            pag["_dias_v"] = (pag["_venc_d"] - hoje).dt.days.fillna(999).astype(int)
-        else:
-            pag["_dias_v"] = 999
+        # ═══════════════════════════════════════════════════
+        # PASSO 2 — Remove linhas de total/resumo
+        # (linhas sem fornecedor OU com valores absurdos = linha de subtotal do Hubsoft)
+        # ═══════════════════════════════════════════════════
+        if col_forn:
+            nomes_pag = pag[col_forn].fillna("").astype(str).str.strip()
+            pag = pag[nomes_pag.str.len() >= 2].copy()
 
-        pag_ativ = pag[pag["_st_pag"] != "pago"]
-        S["pag_total"]    = float(pag_ativ["_val"].sum())
-        S["pag_vencidas"] = float(pag[pag["_st_pag"]=="vencida"]["_val"].sum())
-        S["pag_avencer"]  = float(pag[pag["_st_pag"].isin(["a vencer","vence hoje"])]["_val"].sum())
-        S["n_pag"]        = len(pag_ativ)
-        S["n_pag_venc"]   = int((pag["_st_pag"]=="vencida").sum())
-        S["n_pag_avenc"]  = int(pag["_st_pag"].isin(["a vencer","vence hoje"]).sum())
+        # Remove outliers de valor (> 100× o segundo maior valor)
+        val_ref_col = col_val_liq or col_val or col_a_pagar
+        if val_ref_col:
+            vals_sorted = pag[val_ref_col].apply(pv).sort_values(ascending=False)
+            if len(vals_sorted) > 1:
+                segundo_maior = vals_sorted.iloc[1]
+                if segundo_maior > 0:
+                    pag = pag[pag[val_ref_col].apply(pv) <= segundo_maior * 100].copy()
 
-        ordem = {"vencida":0,"vence hoje":1,"a vencer":2,"em dia":3,"—":4,"pago":5}
-        pag["_ord"] = pag["_st_pag"].map(ordem).fillna(9)
-        pag = pag.sort_values(["_ord","_val"], ascending=[True,False])
+        srcs.append(f"Contas a Pagar ({len(pag)} contas)")
+
+        # ═══════════════════════════════════════════════════
+        # PASSO 3 — Converte valores (Hubsoft exporta NEGATIVOS — usa abs())
+        # ═══════════════════════════════════════════════════
+        pag["_val"]       = pag[col_val].apply(pv)       if col_val      else 0.0
+        pag["_val_liq"]   = pag[col_val_liq].apply(pv)   if col_val_liq  else pag["_val"]
+        pag["_val_pago"]  = pag[col_val_pago].apply(pv)  if col_val_pago else 0.0
+        pag["_a_pagar"]   = pag[col_a_pagar].apply(pv)   if col_a_pagar  else (pag["_val_liq"] - pag["_val_pago"])
+        pag["_venc_dt"]   = pd.to_datetime(pag[col_venc], errors="coerce") if col_venc else pd.NaT
+        pag["_cat_pag"]   = pag[col_cat].fillna("Sem categoria").astype(str).str.strip() if col_cat else "Sem categoria"
+        pag["_forn"]      = pag[col_forn].fillna("").astype(str).str.strip() if col_forn else ""
+        pag["_dias_v"]    = (pag["_venc_dt"] - hoje).dt.days.fillna(999).astype(int)
+
+        # ═══════════════════════════════════════════════════
+        # PASSO 4 — Classifica status pelo pagamento + vencimento
+        # ═══════════════════════════════════════════════════
+        def cls_status_pag(row):
+            pago = row["_val_pago"]; a_pg = row["_a_pagar"]
+            if pago > 0 and a_pg <= 0.01:  return "pago"
+            if pago > 0 and a_pg > 0.01:   return "pago_parcial"
+            dias = row["_dias_v"]
+            if   dias < 0:  return "vencida"
+            elif dias == 0: return "vence_hoje"
+            elif dias <= 7: return "vence_semana"
+            else:           return "em_dia"
+
+        pag["_st_pag"] = pag.apply(cls_status_pag, axis=1)
+
+        # ═══════════════════════════════════════════════════
+        # PASSO 5 — Ordena por prioridade de pagamento
+        # ═══════════════════════════════════════════════════
+        PRIO_ORD = {"vencida":0,"vence_hoje":1,"vence_semana":2,"pago_parcial":3,"em_dia":4,"pago":5}
+        pag["_prio"] = pag["_st_pag"].map(PRIO_ORD).fillna(9)
+        pag = pag.sort_values(["_prio","_dias_v","_a_pagar"], ascending=[True,True,False])
+
+        # Labels visuais
+        _PRIO_LABEL = {
+            "vencida":      "🔴 Vencida",
+            "vence_hoje":   "🔴 Vence hoje",
+            "vence_semana": "🟠 Vence em breve",
+            "pago_parcial": "🟡 Pago parcial",
+            "em_dia":       "🔵 Em dia",
+            "pago":         "✅ Pago",
+        }
+        pag["_st_label"] = pag["_st_pag"].map(lambda s: _PRIO_LABEL.get(s, s))
+
+        # ═══════════════════════════════════════════════════
+        # PASSO 6 — Estatísticas financeiras
+        # ═══════════════════════════════════════════════════
+        pendentes    = pag[~pag["_st_pag"].isin(["pago"])]
+        vencidas_df  = pag[pag["_st_pag"]=="vencida"]
+        avencer7_df  = pag[pag["_st_pag"].isin(["vence_semana","vence_hoje"])]
+
+        S["pag_total"]    = float(pendentes["_a_pagar"].sum())
+        S["pag_vencidas"] = float(vencidas_df["_a_pagar"].sum())
+        S["pag_avencer"]  = float(avencer7_df["_a_pagar"].sum())
+        S["n_pag"]        = len(pendentes)
+        S["n_pag_venc"]   = len(vencidas_df)
+        S["n_pag_avenc"]  = len(avencer7_df)
+
+        # Diagnóstico
+        _st.session_state.pag_diag = {
+            "Fornecedor":    col_forn     or "—",
+            "Vencimento":    col_venc     or "—",
+            "Categoria":     col_cat      or "—",
+            "Valor bruto":   col_val      or "—",
+            "Valor líquido": col_val_liq  or "—",
+            "Valor pago":    col_val_pago or "—",
+            "A pagar":       col_a_pagar  or "—",
+        }
         st_session_pag = pag
     else:
         st_session_pag = pag
@@ -1280,12 +1344,52 @@ elif "Importar" in page:
 
         with tab5:
             pc = st.session_state.pag_classif
-            if pc is not None and not pc.empty:
+            if pc is not None and not pc.empty and "_st_pag" in pc.columns:
+                # KPIs rápidos
+                pd5a, pd5b, pd5c = st.columns(3)
+                pd5a.metric("Total a pagar",  brl(s.get("pag_total",0)))
+                pd5b.metric("Vencidas",       brl(s.get("pag_vencidas",0)),
+                            f"{s.get('n_pag_venc',0)} contas", delta_color="inverse")
+                pd5c.metric("Vence 7 dias",   brl(s.get("pag_avencer",0)),
+                            f"{s.get('n_pag_avenc',0)} contas", delta_color="inverse")
+
+                # Diagnóstico de colunas detectadas
+                pag_diag = st.session_state.get("pag_diag",{})
+                if pag_diag:
+                    st.markdown(f"""
+                    <div style='background:#F6F4F1;border-radius:8px;padding:9px 12px;font-size:11px;margin-bottom:8px'>
+                        <strong>Colunas detectadas:</strong> {" · ".join(f"<b>{k}</b>→{v}" for k,v in pag_diag.items() if v!="—")}
+                    </div>""", unsafe_allow_html=True)
+
+                # Tabela formatada
                 df_p = limpar(pc).copy()
-                if "_val"    in pc.columns: df_p["Valor"]       = pc["_val"].apply(brl)
-                if "_st_pag" in pc.columns: df_p["Status"]      = pc["_st_pag"]
-                if "_dias_v" in pc.columns: df_p["Dias p/Venc"] = pc["_dias_v"].apply(lambda x: int(x) if x < 900 else "—")
-                st.dataframe(df_p, use_container_width=True, height=300, hide_index=True)
+                if "_a_pagar"  in pc.columns: df_p["💰 A Pagar"]   = pc["_a_pagar"].apply(brl)
+                if "_val_liq"  in pc.columns: df_p["Valor Líq."]   = pc["_val_liq"].apply(brl)
+                if "_val_pago" in pc.columns: df_p["Valor Pago"]   = pc["_val_pago"].apply(brl)
+                if "_st_label" in pc.columns: df_p["📌 Status"]    = pc["_st_label"]
+                if "_dias_v"   in pc.columns: df_p["Dias"]         = pc["_dias_v"].apply(lambda x: int(x) if x < 900 else "—")
+
+                # Filtros
+                fc1, fc2 = st.columns([2,1])
+                with fc1:
+                    filt_cat = st.selectbox("Categoria:", ["Todas"] + sorted(pc["_cat_pag"].unique().tolist() if "_cat_pag" in pc.columns else []), key="pag_fcat")
+                with fc2:
+                    filt_st  = st.selectbox("Status:", ["Todos","vencida","vence_semana","vence_hoje","em_dia","pago_parcial","pago"], key="pag_fst")
+                if filt_cat != "Todas" and "_cat_pag" in pc.columns:
+                    df_p = df_p[pc["_cat_pag"]==filt_cat]
+                if filt_st != "Todos" and "_st_pag" in pc.columns:
+                    df_p = df_p[pc["_st_pag"]==filt_st]
+
+                st.markdown(f"**{len(df_p)} contas — ordenadas por urgência**")
+                st.dataframe(df_p, use_container_width=True, height=320, hide_index=True)
+
+                # Por categoria
+                if "_cat_pag" in pc.columns and "_a_pagar" in pc.columns:
+                    cat_grp = pc.groupby("_cat_pag")["_a_pagar"].sum().sort_values(ascending=False).reset_index()
+                    cat_grp.columns = ["Categoria","A Pagar"]
+                    cat_grp["A Pagar (R$)"] = cat_grp["A Pagar"].apply(brl)
+                    st.markdown("**Por categoria:**")
+                    st.dataframe(cat_grp[["Categoria","A Pagar (R$)"]], use_container_width=True, hide_index=True)
             else:
                 st.info("Importe a planilha de contas a pagar.")
 
@@ -1323,25 +1427,49 @@ elif "Contas" in page:
     c4.metric("Faturamento",    brl(s["fat_total"])     if s["n_clientes"] else "—", "Disponível para cobrir")
 
     if pc is not None and not pc.empty and "_st_pag" in pc.columns:
-        ativ = pc[pc["_st_pag"] != "pago"]
-        df_m = limpar(ativ).copy()
-        if "_val"    in ativ.columns: df_m["💰 Valor"]  = ativ["_val"].apply(brl)
-        if "_st_pag" in ativ.columns: df_m["📌 Status"] = ativ["_st_pag"]
-        if "_dias_v" in ativ.columns: df_m["⏱ Dias"]   = ativ["_dias_v"].apply(lambda x: int(x) if x < 900 else "—")
+        pendentes = pc[~pc["_st_pag"].isin(["pago"])]
+
+        # Diagnóstico
+        pag_diag = st.session_state.get("pag_diag",{})
+        if pag_diag:
+            cols_det = " · ".join(f"{k}→<b>{v}</b>" for k,v in pag_diag.items() if v!="—")
+            st.markdown(f'<div class="src-bar">⚙️ Colunas: {cols_det}</div>', unsafe_allow_html=True)
+
+        # Tabela completa
+        df_m = limpar(pendentes).copy()
+        if "_a_pagar"  in pendentes.columns: df_m["💰 A Pagar"]   = pendentes["_a_pagar"].apply(brl)
+        if "_val_liq"  in pendentes.columns: df_m["Valor Líq."]   = pendentes["_val_liq"].apply(brl)
+        if "_val_pago" in pendentes.columns: df_m["Valor Pago"]   = pendentes["_val_pago"].apply(brl)
+        if "_st_label" in pendentes.columns: df_m["📌 Status"]    = pendentes["_st_label"]
+        if "_dias_v"   in pendentes.columns: df_m["Dias"]         = pendentes["_dias_v"].apply(lambda x: int(x) if x < 900 else "—")
+        if "_cat_pag"  in pendentes.columns: df_m["Categoria"]    = pendentes["_cat_pag"]
+
+        fc1,fc2 = st.columns([2,1])
+        with fc1:
+            filt_cat2 = st.selectbox("Categoria:", ["Todas"] + sorted(pc["_cat_pag"].unique().tolist() if "_cat_pag" in pc.columns else []), key="pag2_fcat")
+        with fc2:
+            filt_st2 = st.selectbox("Status:", ["Todos","vencida","vence_hoje","vence_semana","em_dia","pago_parcial"], key="pag2_fst")
+
+        if filt_cat2 != "Todas" and "_cat_pag" in pendentes.columns:
+            df_m = df_m[pendentes["_cat_pag"]==filt_cat2]
+        if filt_st2 != "Todos" and "_st_pag" in pendentes.columns:
+            df_m = df_m[pendentes["_st_pag"]==filt_st2]
 
         st.markdown(f"**{len(df_m)} contas pendentes — ordenadas por urgência**")
-        st.dataframe(df_m, use_container_width=True, height=350, hide_index=True)
+        st.dataframe(df_m, use_container_width=True, height=340, hide_index=True)
 
-        grp = pc["_st_pag"].value_counts().reset_index()
-        grp.columns=["status","n"]
-        cores = {"vencida":"#D93025","vence hoje":"#FF6B35","a vencer":"#D97706","em dia":"#22A85A","pago":"#CCC"}
-        fig = go.Figure(go.Bar(x=grp["status"], y=grp["n"],
-            marker_color=[cores.get(ss,"#888") for ss in grp["status"]],
-            text=grp["n"], textposition="outside"))
-        fig.update_layout(title="Contas por status", height=180,
-            margin=dict(t=30,b=0,l=0,r=0), plot_bgcolor="white",
-            paper_bgcolor="white", yaxis=dict(visible=False))
-        st.plotly_chart(fig, use_container_width=True)
+        # Gráfico por categoria
+        if "_cat_pag" in pc.columns and "_a_pagar" in pc.columns:
+            cat_g = pendentes.groupby("_cat_pag")["_a_pagar"].sum().sort_values(ascending=False).head(10)
+            fig = go.Figure(go.Bar(
+                x=cat_g.values, y=cat_g.index, orientation="h",
+                marker_color="#F05A22",
+                text=[brl(v) for v in cat_g.values], textposition="outside",
+                textfont_size=10))
+            fig.update_layout(title="Top categorias — valor a pagar", height=300,
+                margin=dict(t=36,b=0,l=0,r=80), plot_bgcolor="white", paper_bgcolor="white",
+                xaxis=dict(visible=False), yaxis=dict(gridcolor="white"))
+            st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("📥 Importe a planilha de contas a pagar em **Importar Planilhas**.")
 
