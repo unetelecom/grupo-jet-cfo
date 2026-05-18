@@ -2198,6 +2198,39 @@ elif "Conciliação" in page:
     ofx   = st.session_state.ofx_df
     s_all = st.session_state.stats
 
+    # ── Upload direto do OFX nesta página se ainda não carregado ──
+    ok_ofx = ofx is not None and not ofx.empty
+    if not ok_ofx:
+        st.markdown("#### 📂 Carregar Extrato Bancário (OFX)")
+        st.caption("Envie o arquivo OFX diretamente aqui para conciliar — sem precisar ir em Extratos Bancários.")
+        ofx_up = st.file_uploader("Extrato OFX", type=["ofx","txt"], key="concil_ofx_up",
+                                   label_visibility="collapsed")
+        if ofx_up:
+            with st.spinner("Lendo extrato OFX..."):
+                try:
+                    for enc in ["latin-1","cp1252","utf-8"]:
+                        try: raw_ofx = ofx_up.read().decode(enc); break
+                        except: ofx_up.seek(0)
+                    parsed = parse_ofx(raw_ofx)
+                    if parsed and parsed["df"] is not None and not parsed["df"].empty:
+                        st.session_state.ofx_df   = parsed["df"]
+                        st.session_state.ofx_saldo = parsed["saldo"]
+                        # Atualiza stats bancários
+                        S2 = st.session_state.stats
+                        S2["banco_entradas"] = parsed["entradas"]
+                        S2["banco_saidas"]   = parsed["saidas"]
+                        S2["banco_saldo"]    = parsed["saldo"]
+                        st.session_state.stats = S2
+                        ofx = parsed["df"]
+                        ok_ofx = True
+                        st.success(f"✅ Extrato carregado: {parsed['n_trans']} transações | "
+                                   f"Entradas: {brl(parsed['entradas'])} | Saldo: {brl(parsed['saldo'])}")
+                        st.rerun()
+                    else:
+                        st.error("Não foi possível ler o arquivo OFX.")
+                except Exception as e:
+                    st.error(f"Erro ao ler OFX: {e}")
+
     # ── Status dos dados necessários ──
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -2208,17 +2241,18 @@ elif "Conciliação" in page:
             <div style='font-size:20px'>{"✅" if ok_hub else "❌"}</div>
             <div style='font-size:12px;font-weight:600;color:#141414'>Planilha Hubsoft</div>
             <div style='font-size:11px;color:#6E6E6E'>
-                {"1857 cobranças carregadas" if ok_hub else "Importe em Importar Planilhas"}</div>
+                {f"{hub['nome_razaosocial'].nunique() if 'nome_razaosocial' in hub.columns else len(hub)} clientes" if ok_hub else "Importe em Importar Planilhas"}</div>
         </div>""", unsafe_allow_html=True)
     with col2:
         ok_ofx = ofx is not None and not ofx.empty
+        n_ent = int((ofx["valor"]>0).sum()) if ok_ofx else 0
         st.markdown(f"""
-        <div style='background:{"#E5F7ED" if ok_ofx else "#FDECEB"};border-radius:8px;
+        <div style='background:{"#E5F7ED" if ok_ofx else "#FFF8E6"};border-radius:8px;
             padding:12px 14px;text-align:center'>
-            <div style='font-size:20px'>{"✅" if ok_ofx else "❌"}</div>
+            <div style='font-size:20px'>{"✅" if ok_ofx else "⬆️"}</div>
             <div style='font-size:12px;font-weight:600;color:#141414'>Extrato Bancário (OFX)</div>
             <div style='font-size:11px;color:#6E6E6E'>
-                {f"{len(ofx)} transações carregadas" if ok_ofx else "Analise em Extratos Bancários"}</div>
+                {f"{n_ent} entradas carregadas" if ok_ofx else "Envie o arquivo OFX acima"}</div>
         </div>""", unsafe_allow_html=True)
     with col3:
         result = st.session_state.get("concil_result")
@@ -2233,8 +2267,11 @@ elif "Conciliação" in page:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    if not ok_hub or not ok_ofx:
-        st.warning("⚠️ Para conciliar é necessário: **1)** Importar a planilha Hubsoft em *Importar Planilhas* e **2)** Analisar um extrato OFX em *Extratos Bancários*.")
+    if not ok_hub:
+        st.warning("⚠️ Importe a planilha Hubsoft em **Importar Planilhas** para continuar.")
+        st.stop()
+    if not ok_ofx:
+        st.info("📂 Envie o arquivo OFX acima para iniciar a conciliação.")
         st.stop()
 
     # ── Botão de conciliação ──
