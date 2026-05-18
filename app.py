@@ -977,10 +977,19 @@ if up_recebidos:
 
 data_ini_ts = pd.Timestamp(data_ini_input)
 
+# ── Calcula rec_pago ANTES de chamar gerar_agenda ──────────────────
+rec_total_pre = float(rec_df["__val"].sum()) if not rec_df.empty and "__val" in rec_df.columns else 0.0
+if not rec_df_recebidos.empty and "__val" in rec_df_recebidos.columns:
+    rec_pago_pre = float(rec_df_recebidos["__val"].sum())
+elif not rec_df.empty and "__pago" in rec_df.columns:
+    rec_pago_pre = float(rec_df.loc[rec_df["__pago"], "__val"].sum())
+else:
+    rec_pago_pre = 0.0
+
 if not pag_df.empty:
     with st.spinner("Calculando agenda de caixa..."):
         agenda = gerar_agenda(pag_df, rec_df, caixa_ini, data_ini_ts, int(dias_hor),
-                            rec_pago_total=rec_pago)
+                            rec_pago_total=rec_pago_pre)
 
 # ══════════════════════════════════════════════════════════════════════
 # TELA INICIAL — sem dados
