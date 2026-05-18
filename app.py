@@ -799,8 +799,9 @@ st.markdown(f"""
 # TABS — as 3 abas restantes da planilha
 # ══════════════════════════════════════════════════════════════════════
 st.markdown("---")
-tab_agenda, tab_lista, tab_nc, tab_maxwell = st.tabs([
+tab_agenda, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
     "📅 Agenda Detalhada",
+    "📂 Por Categoria",
     f"📋 Lista Completa ({a['n_pend']})",
     f"⚠️ Não Cobertos ({a['n_nc']}) — {brl(a['total_nc'])}",
     "🤖 Maxwell CFO",
@@ -871,7 +872,168 @@ with tab_agenda:
             st.caption("— sem pagamentos programados neste dia —")
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 2 — LISTA COMPLETA
+# TAB 2 — POR CATEGORIA
+# ══════════════════════════════════════════════════════════════════════
+with tab_categ:
+    st.markdown("### 📂 Contas a Pagar por Categoria")
+    st.markdown("Visão consolidada de todos os compromissos agrupados por categoria, criticidade e status de pagamento.")
+
+    # Monta dataset por categoria
+    cat_rows = []
+    for _, row in pag_df.iterrows():
+        cat_rows.append({
+            "__cat":    row["__cat"],
+            "__crit":   row["__crit"],
+            "__prio":   int(row["__prio"]),
+            "__apagar": float(row["__apagar"]),
+            "__forn":   row["__forn"],
+            "__venc":   row["__venc"],
+            "__status": row["__status_venc"],
+        })
+    df_cat = pd.DataFrame(cat_rows)
+
+    # Agrupado por categoria
+    grp = (
+        df_cat.groupby(["__cat","__crit","__prio"])
+        .agg(
+            n=("__apagar","count"),
+            total=("__apagar","sum"),
+        )
+        .reset_index()
+        .sort_values(["__prio","total"], ascending=[True, False])
+    )
+    total_geral = df_cat["__apagar"].sum()
+
+    # ── KPIs por criticidade ──
+    crit_vals = df_cat.groupby("__prio")["__apagar"].sum()
+    crit_n    = df_cat.groupby("__prio")["__apagar"].count()
+    ck0,ck1,ck2,ck3 = st.columns(4)
+    ck0.metric("🔴 CRÍTICO",  brl(crit_vals.get(0,0)),  f"{int(crit_n.get(0,0))} contas")
+    ck1.metric("🟠 ALTA",     brl(crit_vals.get(1,0)),  f"{int(crit_n.get(1,0))} contas")
+    ck2.metric("🟡 MÉDIA",    brl(crit_vals.get(2,0)),  f"{int(crit_n.get(2,0))} contas")
+    ck3.metric("🟢 BAIXA",    brl(crit_vals.get(3,0)),  f"{int(crit_n.get(3,0))} contas")
+
+    st.markdown("---")
+
+    # ── Gráfico de barras horizontais por categoria ──
+    grp_chart = grp.sort_values("total", ascending=True).tail(20)
+    colors = grp_chart["__prio"].map({0:"#D93025",1:"#F05A22",2:"#D4A017",3:"#4CAF50"}).fillna("#888")
+
+    fig_cat = go.Figure(go.Bar(
+        y=grp_chart["__cat"],
+        x=grp_chart["total"],
+        orientation="h",
+        marker_color=list(colors),
+        text=[brl(v) for v in grp_chart["total"]],
+        textposition="outside",
+        textfont=dict(size=11, color="#CCC"),
+    ))
+    fig_cat.update_layout(
+        height=max(320, len(grp_chart)*28),
+        plot_bgcolor="#111", paper_bgcolor="#111",
+        font_color="#CCC",
+        xaxis=dict(gridcolor="#222", tickprefix="R$ ", title=""),
+        yaxis=dict(gridcolor="#222", title=""),
+        margin=dict(t=20,b=20,l=220,r=100),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_cat, use_container_width=True)
+
+    # ── Pizza de distribuição ──
+    st.markdown("#### 🥧 Distribuição por Criticidade")
+    pizza_labels = ["🔴 CRÍTICO","🟠 ALTA","🟡 MÉDIA","🟢 BAIXA"]
+    pizza_values = [float(crit_vals.get(i,0)) for i in range(4)]
+    pizza_colors = ["#D93025","#F05A22","#D4A017","#4CAF50"]
+
+    fig_pizza = go.Figure(go.Pie(
+        labels=pizza_labels,
+        values=pizza_values,
+        marker_colors=pizza_colors,
+        hole=0.55,
+        textinfo="percent+label",
+        textfont=dict(size=12),
+    ))
+    fig_pizza.update_layout(
+        height=300,
+        plot_bgcolor="#111", paper_bgcolor="#111",
+        font_color="#CCC",
+        margin=dict(t=20,b=20,l=20,r=20),
+        showlegend=False,
+        annotations=[dict(
+            text=f"<b>{brl(total_geral)}</b>",
+            x=0.5, y=0.5, font_size=13,
+            font_color="#FFF", showarrow=False
+        )]
+    )
+    st.plotly_chart(fig_pizza, use_container_width=True)
+
+    # ── Tabela por categoria com expandir ──
+    st.markdown("---")
+    st.markdown("#### 📋 Detalhe por Categoria")
+
+    # Filtro de criticidade
+    filtro_crit = st.selectbox(
+        "Filtrar por criticidade:",
+        ["Todas","🔴 CRÍTICO","🟠 ALTA","🟡 MÉDIA","🟢 BAIXA"],
+        key="filt_cat_crit"
+    )
+    filtro_prio = {"🔴 CRÍTICO":0,"🟠 ALTA":1,"🟡 MÉDIA":2,"🟢 BAIXA":3}.get(filtro_crit)
+
+    grp_show = grp if filtro_prio is None else grp[grp["__prio"]==filtro_prio]
+
+    for _, r in grp_show.iterrows():
+        cat   = r["__cat"]
+        crit  = r["__crit"]
+        total = r["total"]
+        n     = int(r["n"])
+        pct   = round(total / total_geral * 100, 1)
+
+        # Pega os detalhes desta categoria
+        detalhes = df_cat[df_cat["__cat"]==cat].copy()
+        atras = detalhes[detalhes["__status"]=="ATRASADO"]["__apagar"].sum()
+        avenc = detalhes[detalhes["__status"]=="A VENCER"]["__apagar"].sum()
+
+        with st.expander(
+            f"{crit}  **{cat}**  ·  {brl(total)}  ·  {n} fornecedor{'es' if n>1 else ''}  ·  {pct}% do total",
+            expanded=(r["__prio"]==0)  # CRÍTICO vem aberto
+        ):
+            # Mini KPIs dentro do expander
+            ec1,ec2,ec3 = st.columns(3)
+            ec1.metric("💸 A Pagar total",  brl(total))
+            ec2.metric("🔴 Em atraso",      brl(atras))
+            ec3.metric("⏳ A vencer",       brl(avenc))
+
+            # Fornecedores desta categoria
+            forn_grp = (
+                pag_df[pag_df["__cat"]==cat]
+                [["__forn","__apagar","__status_venc","__venc_str","__dias_atr","__motivo"]]
+                .sort_values("__apagar", ascending=False)
+                .copy()
+            )
+            forn_grp.columns = ["Fornecedor","A Pagar","Status","Vencimento","Dias Atr.","Motivo"]
+            forn_grp["A Pagar"] = forn_grp["A Pagar"].apply(brl)
+            forn_grp["Dias Atr."] = forn_grp["Dias Atr."].apply(lambda d: d if d>0 else "—")
+            st.dataframe(
+                forn_grp, use_container_width=True,
+                hide_index=True,
+                height=min(38*len(forn_grp)+42, 280)
+            )
+
+    st.markdown("---")
+    # Tabela resumo completa
+    st.markdown("#### 📊 Resumo Consolidado")
+    resumo = pd.DataFrame({
+        "Criticidade":    grp["__crit"],
+        "Categoria":      grp["__cat"],
+        "Fornecedores":   grp["n"].astype(int),
+        "A Pagar":        grp["total"].apply(brl),
+        "% do Total":     grp["total"].apply(lambda v: f"{round(v/total_geral*100,1)}%"),
+    })
+    st.dataframe(resumo, use_container_width=True, hide_index=True, height=600)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 3 — LISTA COMPLETA
 # ══════════════════════════════════════════════════════════════════════
 with tab_lista:
     todos = []
