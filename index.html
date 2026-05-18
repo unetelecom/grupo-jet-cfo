@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CFO IA · Grupo Jet</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23F05A22'/><text x='50%' y='54%' font-size='18' text-anchor='middle' dominant-baseline='middle' fill='white' font-family='sans-serif' font-weight='bold'>J</text></svg>">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --o:#F05A22;--o2:#D44E1A;
+  --dark:#141414;--dark2:#1E1E1E;--dark3:#2A2A2A;--dark4:#363636;
+  --light:#F6F4F1;--white:#FFFFFF;
+  --border:#E5E1DC;--border2:#D0CBC4;
+  --muted:#6E6E6E;--muted2:#999;
+  --ok:#22A85A;--ok-bg:#E5F7ED;
+  --er:#D93025;--er-bg:#FDECEB;
+  --wa:#D97706;--wa-bg:#FEF3CD;
+  --inf:#1D6FA4;--inf-bg:#E6F2FB;
+  --sidebar:220px;
+  --topbar:52px;
+}
+html,body{height:100%;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--light);color:var(--dark);font-size:14px}
+a{text-decoration:none;color:inherit}
+
+/* ── LAYOUT ── */
+.app{display:flex;height:100vh;overflow:hidden}
+.sidebar{width:var(--sidebar);background:var(--dark);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── SIDEBAR ── */
+.sb-logo{padding:16px 14px 14px;border-bottom:1px solid var(--dark3);display:flex;align-items:center;gap:10px}
+.sb-logo-icon{width:32px;height:32px;background:var(--o);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sb-logo-icon img{width:20px;height:20px;object-fit:contain}
+.sb-logo-text .name{color:#fff;font-size:14px;font-weight:700;line-height:1.2}
+.sb-logo-text .role{color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.07em}
+.sb-nav{flex:1;padding:10px 0;overflow-y:auto}
+.sb-nav::-webkit-scrollbar{width:3px}
+.sb-nav::-webkit-scrollbar-thumb{background:#333}
+.sb-section{padding:10px 14px 4px;font-size:9px;color:#444;text-transform:uppercase;letter-spacing:.12em;font-weight:600}
+.sb-item{display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;color:#888;font-size:12px;border-left:3px solid transparent;transition:all .15s;white-space:nowrap;overflow:hidden}
+.sb-item:hover{background:var(--dark3);color:#CCC}
+.sb-item.active{background:var(--dark3);color:#FFF;border-left-color:var(--o)}
+.sb-item i{font-size:15px;flex-shrink:0;width:16px}
+.sb-item .label{flex:1;overflow:hidden;text-overflow:ellipsis}
+.sb-item .badge{background:var(--o);color:#fff;border-radius:10px;padding:1px 6px;font-size:9px;font-weight:700;flex-shrink:0}
+.sb-footer{padding:12px 14px;border-top:1px solid var(--dark3)}
+.cfo-card{background:linear-gradient(135deg,var(--o),#FF8040);border-radius:10px;padding:10px 12px;cursor:pointer}
+.cfo-card .title{color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;gap:5px}
+.cfo-card .sub{color:rgba(255,255,255,.7);font-size:10px;margin-top:3px}
+.cfo-online{width:7px;height:7px;border-radius:50%;background:#fff;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── TOPBAR ── */
+.topbar{height:var(--topbar);background:var(--white);border-bottom:.5px solid var(--border);display:flex;align-items:center;padding:0 22px;gap:12px;flex-shrink:0}
+.topbar-title{font-size:15px;font-weight:700;color:var(--dark)}
+.topbar-sub{font-size:11px;color:var(--muted);margin-top:1px}
+.topbar-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+.btn{padding:7px 14px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;border:none;display:flex;align-items:center;gap:6px;transition:all .15s;white-space:nowrap}
+.btn-orange{background:var(--o);color:#fff}
+.btn-orange:hover{background:var(--o2)}
+.btn-dark{background:var(--dark);color:#fff}
+.btn-dark:hover{background:#000}
+.btn-ghost{background:transparent;border:.5px solid var(--border2);color:var(--dark)}
+.btn-ghost:hover{background:var(--light)}
+.btn:disabled{opacity:.5;cursor:default}
+
+/* ── PAGES ── */
+.page{display:none;flex:1;overflow-y:auto;padding:20px 22px}
+.page.active{display:block}
+
+/* ── CARDS ── */
+.card{background:var(--white);border-radius:10px;border:.5px solid var(--border);padding:16px}
+.card-title{font-size:12px;font-weight:700;color:var(--dark);margin-bottom:12px;display:flex;align-items:center;gap:7px;text-transform:uppercase;letter-spacing:.04em}
+.card-title i{color:var(--o);font-size:15px}
+
+/* ── KPI GRIDS ── */
+.kpi-grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+.kpi-grid-5{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px}
+.kpi{background:var(--white);border-radius:10px;border:.5px solid var(--border);padding:14px 16px}
+.kpi-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.kpi-val{font-size:22px;font-weight:800;color:var(--dark);line-height:1}
+.kpi-sub{font-size:11px;margin-top:5px;display:flex;align-items:center;gap:4px}
+.kpi-sub.pos{color:var(--ok)}
+.kpi-sub.neg{color:var(--er)}
+.kpi-sub.warn{color:var(--wa)}
+.kpi-sub.muted{color:var(--muted)}
+
+/* ── TABLES ── */
+.tbl-wrap{overflow-x:auto}
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{padding:8px 12px;text-align:left;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.05em;border-bottom:.5px solid var(--border);background:#FAFAF8;white-space:nowrap}
+.tbl td{padding:9px 12px;border-bottom:.5px solid var(--border);color:var(--dark);vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:#FAFAF8}
+.cell-name{display:flex;align-items:center;gap:8px}
+.av{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+.nm{font-weight:600;font-size:12px}
+.sid{font-size:10px;color:var(--muted);margin-top:1px}
+
+/* ── PILLS ── */
+.pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap}
+.p-ok{background:var(--ok-bg);color:#0A5C2E}
+.p-er{background:var(--er-bg);color:#8B1A1A}
+.p-wa{background:var(--wa-bg);color:#7A4F00}
+.p-bl{background:var(--inf-bg);color:#1A3F8A}
+.p-gr{background:#F0EDE8;color:#555}
+.p-or{background:#FFF0EB;color:#8A3A10}
+
+/* ── TABS ── */
+.tabs-bar{display:flex;border-bottom:.5px solid var(--border);margin-bottom:16px;gap:2px}
+.tab{padding:9px 14px;font-size:12px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.tab:hover{color:var(--dark)}
+.tab.act{color:var(--o);border-bottom-color:var(--o);font-weight:600}
+.tc{background:var(--light);border-radius:20px;padding:1px 6px;font-size:10px;font-weight:600}
+.tab.act .tc{background:#FFF0EB;color:var(--o)}
+.sub-panel{display:none}
+.sub-panel.act{display:block}
+
+/* ── FORMS / INPUTS ── */
+.inp{padding:8px 11px;border-radius:7px;border:.5px solid var(--border);font-size:12px;font-family:inherit;color:var(--dark);background:var(--white);outline:none;width:100%}
+.inp:focus{border-color:var(--o);box-shadow:0 0 0 2px rgba(240,90,34,.1)}
+.inp-label{font-size:11px;color:var(--muted);margin-bottom:4px;display:block}
+.inp-group{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+
+/* ── UPLOAD ZONES ── */
+.drop-zone{border:1.5px dashed #CCC8C2;border-radius:10px;padding:24px 16px;text-align:center;cursor:pointer;transition:all .2s;background:#FAFAF8}
+.drop-zone:hover,.drop-zone.drag{border-color:var(--o);background:#FFF5F0}
+.drop-zone.has-file{border-style:solid;border-color:#A8DEB8;background:#F0FAF4}
+.drop-zone .dz-icon{font-size:30px;color:#CCC;display:block;margin-bottom:8px}
+.drop-zone.has-file .dz-icon{color:var(--ok)}
+.drop-zone .dz-title{font-size:13px;font-weight:600;margin-bottom:3px}
+.drop-zone .dz-sub{font-size:11px;color:var(--muted);line-height:1.5}
+.fmts{display:flex;justify-content:center;gap:5px;margin-top:8px;flex-wrap:wrap}
+.fmt{padding:2px 7px;border-radius:4px;font-size:10px;background:#EDEBE6;color:var(--muted);font-weight:500}
+.file-chip{display:flex;align-items:center;gap:8px;background:var(--white);border:.5px solid #A8DEB8;border-radius:8px;padding:8px 11px;margin-top:8px}
+.chip-ico{width:30px;height:30px;border-radius:6px;background:var(--ok-bg);color:var(--ok);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.chip-info{flex:1;min-width:0}
+.chip-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-size{font-size:10px;color:var(--muted)}
+.chip-del{background:transparent;border:none;cursor:pointer;color:#CCC;padding:2px;border-radius:4px}
+.chip-del:hover{background:var(--er-bg);color:var(--er)}
+
+/* ── CHAT ── */
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - var(--topbar) - 40px)}
+.chat-header{background:var(--white);border-radius:10px;border:.5px solid var(--border);padding:14px 16px;display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-shrink:0}
+.chat-avatar{width:44px;height:44px;border-radius:50%;background:var(--o);display:flex;align-items:center;justify-content:center;color:#fff;font-size:20px;flex-shrink:0}
+.chat-status{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--ok)}
+.chat-area{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px 0;min-height:0}
+.msg{display:flex;gap:8px;max-width:85%}
+.msg.user{align-self:flex-end;flex-direction:row-reverse}
+.msg-av{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;margin-top:2px}
+.msg.ai .msg-av{background:var(--o);color:#fff}
+.msg.user .msg-av{background:var(--light);color:var(--dark);border:.5px solid var(--border)}
+.bubble{padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.65}
+.msg.ai .bubble{background:var(--white);border:.5px solid var(--border);border-radius:4px 12px 12px 12px}
+.msg.user .bubble{background:var(--o);color:#fff;border-radius:12px 4px 12px 12px}
+.chat-input-row{background:var(--white);border-radius:10px;border:.5px solid var(--border);padding:10px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0;margin-top:10px}
+.chat-textarea{flex:1;border:none;outline:none;font-size:13px;resize:none;font-family:inherit;max-height:80px;line-height:1.5;background:transparent}
+.chat-textarea::placeholder{color:#BBB}
+.chat-send{background:var(--o);border:none;border-radius:7px;width:34px;height:34px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0}
+.chat-send:hover{background:var(--o2)}
+.chat-send:disabled{opacity:.4;cursor:default}
+.quick-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;flex-shrink:0}
+.qchip{padding:5px 12px;border-radius:20px;font-size:11px;background:var(--white);border:.5px solid var(--border);cursor:pointer;color:var(--dark);transition:all .15s}
+.qchip:hover{background:var(--o);color:#fff;border-color:var(--o)}
+.thinking-dots span{display:inline-block;width:5px;height:5px;background:var(--o);border-radius:50%;margin:0 1px;animation:bk .9s infinite}
+.thinking-dots span:nth-child(2){animation-delay:.15s}
+.thinking-dots span:nth-child(3){animation-delay:.3s}
+@keyframes bk{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+
+/* ── BANCO OPTS ── */
+.banco-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.banco-opt{padding:10px 12px;border-radius:8px;border:.5px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:9px;transition:all .15s;background:var(--white)}
+.banco-opt:hover{border-color:var(--o);background:#FFF5F0}
+.banco-opt.sel{border-color:var(--o);background:#FFF5F0;font-weight:600}
+.banco-logo{width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0}
+.banco-info .bname{font-size:12px;font-weight:600}
+.banco-info .bsub{font-size:10px;color:var(--muted)}
+.check-circle{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border);flex-shrink:0;margin-left:auto;display:flex;align-items:center;justify-content:center}
+.banco-opt.sel .check-circle{background:var(--o);border-color:var(--o)}
+.banco-opt.sel .check-circle::after{content:'';width:6px;height:6px;border-radius:50%;background:#fff}
+
+/* ── PRIORITY ROWS ── */
+.prio-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;background:var(--light);margin-bottom:6px}
+.prio-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.prio-val{font-size:13px;font-weight:700}
+.prog-bar{height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:3px;width:100%}
+.prog-fill{height:100%;border-radius:3px}
+
+/* ── GRID ROWS ── */
+.row-2{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;margin-bottom:18px}
+.row-2-eq{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px}
+
+/* ── ACTION BUTTONS IN TABLE ── */
+.row-act{display:flex;gap:4px}
+.act-btn{width:26px;height:26px;border-radius:5px;border:.5px solid var(--border);background:var(--white);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;transition:all .15s}
+.act-btn:hover{background:var(--o);color:#fff;border-color:var(--o)}
+
+/* ── INSIGHT BOX ── */
+.insight-box{border-left:3px solid var(--o);background:#FFF5F0;padding:12px 14px;border-radius:0 8px 8px 0;font-size:12px;line-height:1.75;color:var(--dark)}
+
+/* ── EMPTY ── */
+.empty-state{text-align:center;padding:48px 20px;color:var(--muted)}
+.empty-state i{font-size:36px;display:block;margin-bottom:10px;color:#DDD}
+.empty-state p{font-size:12px;line-height:1.7}
+
+/* ── LOADING ── */
+.ld-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:40px;color:var(--muted)}
+.ld-dots span{display:inline-block;width:7px;height:7px;background:var(--o);border-radius:50%;margin:0 2px;animation:bk .9s infinite}
+.ld-dots span:nth-child(2){animation-delay:.15s}
+.ld-dots span:nth-child(3){animation-delay:.3s}
+
+/* ── NOTICE ── */
+.notice{display:flex;align-items:center;gap:8px;background:var(--er-bg);border:.5px solid #F5BCBC;border-radius:8px;padding:10px 14px;font-size:12px;color:#8B1A1A;margin-bottom:14px}
+.notice i{flex-shrink:0;color:var(--er)}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:#DDD;border-radius:3px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ── RESPONSIVE ── */
+@media(max-width:768px){
+  .sidebar{width:56px}
+  .sb-logo-text,.sb-item .label,.sb-item .badge,.sb-section,.cfo-card .sub{display:none}
+  .sb-item{justify-content:center;padding:10px}
+  .kpi-grid-4,.kpi-grid-5{grid-template-columns:repeat(2,1fr)}
+  .row-2,.row-2-eq,.grid-2,.grid-3{grid-template-columns:1fr}
+  .banco-grid{grid-template-columns:1fr}
+  :root{--sidebar:56px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── SIDEBAR ── -->
+<aside class="sidebar">
+  <div class="sb-logo">
+    <div class="sb-logo-icon">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="#fff" stroke-width="1.5"/><path d="M7 10l2 2 4-4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="sb-logo-text">
+      <div class="name">Grupo Jet</div>
+      <div class="role">CFO Inteligente</div>
+    </div>
+  </div>
+
+  <nav class="sb-nav">
+    <div class="sb-section">Visão Geral</div>
+    <div class="sb-item active" onclick="nav('dashboard',this)"><i class="ti ti-layout-dashboard"></i><span class="label">Dashboard</span></div>
+    <div class="sb-item" onclick="nav('clientes',this)"><i class="ti ti-users"></i><span class="label">Clientes</span></div>
+
+    <div class="sb-section">Financeiro</div>
+    <div class="sb-item" onclick="nav('extratos',this)"><i class="ti ti-file-invoice"></i><span class="label">Extratos Bancários</span></div>
+    <div class="sb-item" onclick="nav('planilhas',this)"><i class="ti ti-table-import"></i><span class="label">Importar Planilhas</span></div>
+    <div class="sb-item" onclick="nav('pagamentos',this)"><i class="ti ti-receipt-2"></i><span class="label">Contas a Pagar</span></div>
+    <div class="sb-item" onclick="nav('previsao',this)"><i class="ti ti-chart-line"></i><span class="label">Previsão</span></div>
+    <div class="sb-item" onclick="nav('negociacao',this)"><i class="ti ti-handshake"></i><span class="label">Negociação</span></div>
+
+    <div class="sb-section">IA</div>
+    <div class="sb-item" onclick="nav('cfo',this)"><i class="ti ti-robot"></i><span class="label">Diretor CFO IA</span><span class="badge">AI</span></div>
+  </nav>
+
+  <div class="sb-footer">
+    <div class="cfo-card" onclick="nav('cfo',document.querySelector('.sb-item:last-of-type'))">
+      <div class="title"><div class="cfo-online"></div> Maxwell CFO</div>
+      <div class="sub">Análise em tempo real</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ── MAIN ── -->
+<div class="main">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title" id="page-title">Dashboard Financeiro</div>
+      <div class="topbar-sub" id="page-sub">Grupo Jet · <span id="hoje-date"></span></div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" onclick="askCFO('Gere um relatório executivo financeiro completo do Grupo Jet com todas as métricas e recomendações estratégicas')"><i class="ti ti-file-export"></i>Relatório</button>
+      <button class="btn btn-orange" onclick="nav('cfo',null)"><i class="ti ti-robot"></i>Consultar CFO</button>
+    </div>
+  </div>
+
+  <!-- ════ DASHBOARD ════ -->
+  <div class="page active" id="page-dashboard">
+    <div class="kpi-grid-4">
+      <div class="kpi"><div class="kpi-lbl">Faturamento Mensal</div><div class="kpi-val">R$ 4,2M</div><div class="kpi-sub pos"><i class="ti ti-trending-up"></i>+12,4% vs mês anterior</div></div>
+      <div class="kpi"><div class="kpi-lbl">Contas a Receber</div><div class="kpi-val">R$ 1,8M</div><div class="kpi-sub warn"><i class="ti ti-clock"></i>34 títulos em aberto</div></div>
+      <div class="kpi"><div class="kpi-lbl">Contas a Pagar</div><div class="kpi-val">R$ 980K</div><div class="kpi-sub neg"><i class="ti ti-alert-triangle"></i>8 vencem esta semana</div></div>
+      <div class="kpi"><div class="kpi-lbl">Margem Líquida</div><div class="kpi-val">18,7%</div><div class="kpi-sub pos"><i class="ti ti-trending-up"></i>+2,1pp acima da meta</div></div>
+    </div>
+    <div class="row-2">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-chart-area"></i>Fluxo de Caixa — 6 meses</div>
+        <div style="position:relative;height:200px"><canvas id="fluxoChart" role="img" aria-label="Fluxo de caixa 6 meses"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><i class="ti ti-alert-circle"></i>Prioridades Imediatas</div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--er)"></div><div style="flex:1"><div style="font-size:12px;font-weight:600">Fornecedor Logística S.A.</div><div style="font-size:10px;color:var(--muted)">Vence hoje</div></div><div style="text-align:right"><div class="prio-val" style="color:var(--er)">R$ 85K</div><span class="pill p-er">Urgente</span></div></div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--wa)"></div><div style="flex:1"><div style="font-size:12px;font-weight:600">Folha de Pagamento</div><div style="font-size:10px;color:var(--muted)">Em 3 dias</div></div><div style="text-align:right"><div class="prio-val" style="color:var(--wa)">R$ 320K</div><span class="pill p-wa">Atenção</span></div></div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--ok)"></div><div style="flex:1"><div style="font-size:12px;font-weight:600">ABC Transportes — Receb.</div><div style="font-size:10px;color:var(--muted)">Em 5 dias</div></div><div style="text-align:right"><div class="prio-val" style="color:var(--ok)">R$ 210K</div><span class="pill p-ok">Confirmado</span></div></div>
+      </div>
+    </div>
+    <div class="row-2-eq">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-chart-donut"></i>Composição de Receita</div>
+        <div style="position:relative;height:180px"><canvas id="receitaChart" role="img" aria-label="Composição de receita"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><i class="ti ti-brain"></i>Insight CFO IA</div>
+        <div class="insight-box">💡 <strong>Atenção crítica:</strong> Inadimplência subiu 2,3pp no trimestre. Recomendo renegociação preventiva com os 5 maiores devedores antes do fechamento do mês. Janela positiva de caixa entre dias 15–22 — ideal para antecipar recebíveis e reduzir custo financeiro.</div>
+        <button class="btn btn-orange" style="margin-top:12px;width:100%;justify-content:center" onclick="nav('cfo',null)"><i class="ti ti-robot"></i>Consultar CFO completo</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ CLIENTES ════ -->
+  <div class="page" id="page-clientes">
+    <div class="kpi-grid-4">
+      <div class="kpi"><div class="kpi-lbl">Total Clientes</div><div class="kpi-val" id="cli-k1">—</div><div class="kpi-sub muted" id="cli-k1s">importe planilha</div></div>
+      <div class="kpi"><div class="kpi-lbl">Faturamento</div><div class="kpi-val" id="cli-k2">—</div><div class="kpi-sub muted" id="cli-k2s"></div></div>
+      <div class="kpi"><div class="kpi-lbl">Inadimplentes</div><div class="kpi-val" id="cli-k3">—</div><div class="kpi-sub neg" id="cli-k3s"></div></div>
+      <div class="kpi"><div class="kpi-lbl">Recebido</div><div class="kpi-val" id="cli-k4">—</div><div class="kpi-sub pos" id="cli-k4s"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><i class="ti ti-users"></i>Carteira de Clientes</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px;background:var(--light);border-radius:7px;padding:6px 10px;flex:1;min-width:160px"><i class="ti ti-search" style="color:var(--muted);font-size:13px"></i><input type="text" id="cliSearch" placeholder="Buscar cliente, CPF/CNPJ..." style="border:none;background:transparent;outline:none;font-size:12px;width:100%;font-family:inherit" oninput="filtrarCli()"></div>
+        <select class="inp" id="cliStatus" style="width:auto;flex:none" onchange="filtrarCli()"><option value="">Todos status</option><option value="ativo">Ativo</option><option value="inadimplente">Inadimplente</option><option value="suspenso">Suspenso</option><option value="cancelado">Cancelado</option></select>
+        <button class="btn btn-orange" onclick="askCFO('Analise a carteira completa de clientes da Jet Telecom e gere estratégia de retenção e cobrança')"><i class="ti ti-robot"></i>Analisar com IA</button>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>Cliente</th><th>Plano</th><th>Mensalidade</th><th>Status</th><th>Vencimento</th><th>Cidade</th><th>Ações</th></tr></thead>
+          <tbody id="tbCli"><tr><td colspan="7" class="empty-state"><i class="ti ti-table-import" style="font-size:24px;margin-bottom:6px;display:block"></i><p>Importe a planilha Hubsoft na seção<br><strong>Importar Planilhas</strong> para carregar os clientes.</p></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ EXTRATOS ════ -->
+  <div class="page" id="page-extratos">
+    <div class="row-2-eq">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="card">
+          <div class="card-title"><i class="ti ti-building-bank"></i>Conta bancária</div>
+          <div class="banco-grid" id="bancoGrid">
+            <div class="banco-opt sel" onclick="selBanco(this,'BTG Pactual')"><div class="banco-logo" style="background:#003D6A;color:#fff">BTG</div><div class="banco-info"><div class="bname">BTG Pactual</div><div class="bsub">Empresarial</div></div><div class="check-circle"></div></div>
+            <div class="banco-opt" onclick="selBanco(this,'Caixa Econômica Federal')"><div class="banco-logo" style="background:#005CA2;color:#F7A800">CEF</div><div class="banco-info"><div class="bname">Caixa Econômica</div><div class="bsub">Conta corrente PJ</div></div><div class="check-circle"></div></div>
+            <div class="banco-opt" onclick="selBanco(this,'C6 Bank')"><div class="banco-logo" style="background:#222;color:#FFF">C6</div><div class="banco-info"><div class="bname">C6 Bank</div><div class="bsub">Conta digital PJ</div></div><div class="check-circle"></div></div>
+            <div class="banco-opt" onclick="selBanco(this,'Banco Safra')"><div class="banco-logo" style="background:#E3001B;color:#fff">SAF</div><div class="banco-info"><div class="bname">Banco Safra</div><div class="bsub">Conta empresarial</div></div><div class="check-circle"></div></div>
+            <div class="banco-opt" onclick="selBanco(this,'Banco do Brasil')"><div class="banco-logo" style="background:#FFCC00;color:#003399">BB</div><div class="banco-info"><div class="bname">Banco do Brasil</div><div class="bsub">Conta corrente PJ</div></div><div class="check-circle"></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><i class="ti ti-calendar"></i>Período</div>
+          <div class="grid-2">
+            <div class="inp-group"><label class="inp-label">Data inicial</label><input type="date" class="inp" id="extDtI" value="2025-05-01"></div>
+            <div class="inp-group"><label class="inp-label">Data final</label><input type="date" class="inp" id="extDtF"></div>
+            <div class="inp-group"><label class="inp-label">Empresa</label><input type="text" class="inp" id="extEmp" value="Grupo Jet"></div>
+            <div class="inp-group"><label class="inp-label">Tipo de análise</label><select class="inp" id="extTipo"><option>Análise completa</option><option>Fluxo de caixa</option><option>Receitas e despesas</option><option>Inadimplência</option><option>Planejamento</option></select></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title"><i class="ti ti-upload"></i>Enviar extrato</div>
+          <div class="drop-zone" id="dropExt" ondragover="ev(event);this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="onDropExt(event)">
+            <i class="ti ti-file-upload dz-icon"></i>
+            <div class="dz-title">Arraste o extrato aqui</div>
+            <div class="dz-sub">ou clique para selecionar</div>
+            <div class="fmts"><span class="fmt">PDF</span><span class="fmt">CSV</span><span class="fmt">OFX</span><span class="fmt">TXT</span><span class="fmt">XLS</span></div>
+            <button class="btn btn-orange" style="margin-top:10px" onclick="document.getElementById('inpExt').click()"><i class="ti ti-plus"></i>Selecionar</button>
+          </div>
+          <input type="file" id="inpExt" style="display:none" accept=".pdf,.csv,.ofx,.txt,.xls,.xlsx" multiple onchange="onFilesExt(this.files)">
+          <div id="extFileList"></div>
+          <button class="btn btn-orange" id="btnAnaliseExt" style="width:100%;justify-content:center;margin-top:12px;display:none" onclick="analisarExtrato()"><i class="ti ti-robot"></i>Analisar com CFO IA</button>
+        </div>
+      </div>
+      <div class="card" style="overflow-y:auto;max-height:600px">
+        <div class="card-title"><i class="ti ti-brain"></i>Análise do Diretor Financeiro</div>
+        <div id="extResult" class="empty-state"><i class="ti ti-chart-dots"></i><p>Selecione o banco, período<br>e envie o extrato para análise.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ PLANILHAS ════ -->
+  <div class="page" id="page-planilhas">
+    <div class="row-2-eq" style="align-items:start">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="card">
+          <div class="card-title"><i class="ti ti-building-store"></i>Planilha Hubsoft</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:10px">Exporte de: Relatórios → Clientes / Faturamento / Inadimplência</p>
+          <div class="drop-zone" id="dropHub" ondragover="ev(event);this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="onDropSheet(event,'hub')">
+            <i class="ti ti-file-spreadsheet dz-icon"></i>
+            <div class="dz-title">Exportação do Hubsoft</div>
+            <div class="dz-sub">Arraste ou clique para selecionar</div>
+            <div class="fmts"><span class="fmt">XLSX</span><span class="fmt">XLS</span><span class="fmt">CSV</span></div>
+            <button class="btn btn-orange" style="margin-top:10px" onclick="document.getElementById('inpHub').click()"><i class="ti ti-upload"></i>Selecionar</button>
+          </div>
+          <input type="file" id="inpHub" style="display:none" accept=".xlsx,.xls,.csv" onchange="onSheet(this,'hub')">
+          <div id="chipHub"></div>
+          <select class="inp" id="sheetHub" style="display:none;margin-top:8px" onchange="lerSheet('hub')"><option value="">— Selecionar aba —</option></select>
+        </div>
+        <div class="card">
+          <div class="card-title"><i class="ti ti-receipt-2"></i>Contas a Pagar</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:10px">Vencidas e a vencer — qualquer formato de planilha</p>
+          <div class="drop-zone" id="dropPag" ondragover="ev(event);this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="onDropSheet(event,'pag')">
+            <i class="ti ti-file-dollar dz-icon"></i>
+            <div class="dz-title">Planilha Contas a Pagar</div>
+            <div class="dz-sub">Arraste ou clique para selecionar</div>
+            <div class="fmts"><span class="fmt">XLSX</span><span class="fmt">XLS</span><span class="fmt">CSV</span></div>
+            <button class="btn btn-orange" style="margin-top:10px" onclick="document.getElementById('inpPag').click()"><i class="ti ti-upload"></i>Selecionar</button>
+          </div>
+          <input type="file" id="inpPag" style="display:none" accept=".xlsx,.xls,.csv" onchange="onSheet(this,'pag')">
+          <div id="chipPag"></div>
+          <select class="inp" id="sheetPag" style="display:none;margin-top:8px" onchange="lerSheet('pag')"><option value="">— Selecionar aba —</option></select>
+        </div>
+        <button class="btn btn-orange" id="btnAnalisePlan" style="justify-content:center" disabled onclick="analisarPlanilhas()"><i class="ti ti-robot"></i>Analisar tudo com CFO IA</button>
+      </div>
+      <div>
+        <div class="kpi-grid-4" id="kpiPlan" style="display:none">
+          <div class="kpi"><div class="kpi-lbl">Clientes</div><div class="kpi-val" id="pk1">—</div><div class="kpi-sub muted" id="pk1s"></div></div>
+          <div class="kpi"><div class="kpi-lbl">Faturamento</div><div class="kpi-val" id="pk2">—</div><div class="kpi-sub muted" id="pk2s"></div></div>
+          <div class="kpi"><div class="kpi-lbl">Inadimplência</div><div class="kpi-val" id="pk3">—</div><div class="kpi-sub neg" id="pk3s"></div></div>
+          <div class="kpi"><div class="kpi-lbl">A pagar</div><div class="kpi-val" id="pk4">—</div><div class="kpi-sub neg" id="pk4s"></div></div>
+        </div>
+        <div class="card">
+          <div class="tabs-bar">
+            <div class="tab act" onclick="swPlan('hub',this)"><i class="ti ti-users"></i>Hubsoft <span class="tc" id="ptc1">0</span></div>
+            <div class="tab" onclick="swPlan('inad',this)"><i class="ti ti-alert-triangle"></i>Inadimplência <span class="tc" id="ptc2">0</span></div>
+            <div class="tab" onclick="swPlan('pag',this)"><i class="ti ti-receipt-2"></i>A Pagar <span class="tc" id="ptc3">0</span></div>
+            <div class="tab" onclick="swPlan('res',this)"><i class="ti ti-brain"></i>CFO</div>
+          </div>
+          <div style="overflow-y:auto;max-height:380px">
+            <div class="sub-panel act" id="spp-hub"><div class="empty-state" id="epHub"><i class="ti ti-building-store"></i><p>Importe a planilha Hubsoft</p></div><table class="tbl" id="tPHub" style="display:none"><thead id="thHub"></thead><tbody id="tbHub"></tbody></table></div>
+            <div class="sub-panel" id="spp-inad"><div class="empty-state" id="epInad"><i class="ti ti-alert-triangle"></i><p>Sem dados de inadimplência</p></div><table class="tbl" id="tPInad" style="display:none"><thead><tr><th>Cliente</th><th>Em aberto</th><th>Dias</th><th>Risco</th><th>Ações</th></tr></thead><tbody id="tbInad"></tbody></table></div>
+            <div class="sub-panel" id="spp-pag"><div class="empty-state" id="epPag"><i class="ti ti-receipt-2"></i><p>Importe a planilha de contas a pagar</p></div><table class="tbl" id="tPPag" style="display:none"><thead><tr><th>Fornecedor</th><th>Valor</th><th>Vencimento</th><th>Status</th><th>Prioridade</th><th>Ações</th></tr></thead><tbody id="tbPag"></tbody></table></div>
+            <div class="sub-panel" id="spp-res"><div class="empty-state" id="epRes"><i class="ti ti-brain"></i><p>Clique em <strong>Analisar com CFO IA</strong> para gerar o relatório estratégico.</p></div><div id="planRes" style="display:none;padding:4px 0"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ PAGAMENTOS ════ -->
+  <div class="page" id="page-pagamentos">
+    <div class="kpi-grid-4">
+      <div class="kpi"><div class="kpi-lbl">Total a Pagar</div><div class="kpi-val">R$ 983K</div><div class="kpi-sub neg"><i class="ti ti-alert-triangle"></i>Este mês</div></div>
+      <div class="kpi"><div class="kpi-lbl">Vencidas</div><div class="kpi-val">R$ 85K</div><div class="kpi-sub neg"><i class="ti ti-x"></i>2 fornecedores</div></div>
+      <div class="kpi"><div class="kpi-lbl">Vencendo 7 dias</div><div class="kpi-val">R$ 362K</div><div class="kpi-sub warn"><i class="ti ti-clock"></i>3 contas</div></div>
+      <div class="kpi"><div class="kpi-lbl">Em dia</div><div class="kpi-val">R$ 536K</div><div class="kpi-sub pos"><i class="ti ti-check"></i>No prazo</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><i class="ti ti-list-check"></i>Fila de Pagamentos · Scoring de Prioridade</div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>Fornecedor / Obrigação</th><th>Valor</th><th>Vencimento</th><th>Score</th><th>Prioridade</th><th>Ações</th></tr></thead>
+          <tbody>
+            <tr><td><div class="nm">Folha de Pagamento</div><div class="sid">Obrigação legal</div></td><td style="font-weight:700">R$ 320.000</td><td>25/05</td><td><div style="font-size:12px;font-weight:700;color:var(--er)">100</div><div class="prog-bar" style="width:80px"><div class="prog-fill" style="width:100%;background:var(--er)"></div></div></td><td><span class="pill p-er">Crítico</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Estratégia para garantir o pagamento da folha de R$ 320.000 na data')"><i class="ti ti-robot"></i></button></div></td></tr>
+            <tr><td><div class="nm">Logística S.A.</div><div class="sid">Operação core</div></td><td style="font-weight:700">R$ 85.000</td><td>17/05</td><td><div style="font-size:12px;font-weight:700;color:var(--er)">95</div><div class="prog-bar" style="width:80px"><div class="prog-fill" style="width:95%;background:var(--er)"></div></div></td><td><span class="pill p-er">Urgente</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Analise a conta vencida com Logística S.A. de R$ 85.000 e sugira negociação de prazo')"><i class="ti ti-robot"></i></button></div></td></tr>
+            <tr><td><div class="nm">Seguro Frota</div><div class="sid">Proteção de ativos</div></td><td style="font-weight:700">R$ 42.500</td><td>22/05</td><td><div style="font-size:12px;font-weight:700;color:var(--wa)">82</div><div class="prog-bar" style="width:80px"><div class="prog-fill" style="width:82%;background:var(--wa)"></div></div></td><td><span class="pill p-wa">Alto</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Estratégia para renegociar o seguro de frota buscando redução de 12%')"><i class="ti ti-robot"></i></button></div></td></tr>
+            <tr><td><div class="nm">Manutenção Veículos</div><div class="sid">Serviço recorrente</div></td><td style="font-weight:700">R$ 28.000</td><td>30/05</td><td><div style="font-size:12px;font-weight:700;color:var(--wa)">60</div><div class="prog-bar" style="width:80px"><div class="prog-fill" style="width:60%;background:var(--wa)"></div></div></td><td><span class="pill p-wa">Médio</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Como negociar o prazo de manutenção de veículos de R$ 28.000?')"><i class="ti ti-robot"></i></button></div></td></tr>
+            <tr><td><div class="nm">Software ERP</div><div class="sid">Licença mensal</div></td><td style="font-weight:700">R$ 8.200</td><td>31/05</td><td><div style="font-size:12px;font-weight:700;color:var(--ok)">40</div><div class="prog-bar" style="width:80px"><div class="prog-fill" style="width:40%;background:var(--ok)"></div></div></td><td><span class="pill p-ok">Normal</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Vale renegociar o contrato de ERP para reduzir o custo?')"><i class="ti ti-robot"></i></button></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <button class="btn btn-orange" style="margin-top:14px" onclick="askCFO('Analise todas as contas a pagar do Grupo Jet e gere um plano de fluxo de caixa para cobrir todos os compromissos sem comprometer a operação')"><i class="ti ti-robot"></i>Estratégia de caixa pelo CFO IA</button>
+    </div>
+  </div>
+
+  <!-- ════ PREVISÃO ════ -->
+  <div class="page" id="page-previsao">
+    <div class="kpi-grid-4">
+      <div class="kpi" style="border-left:3px solid var(--ok)"><div class="kpi-lbl">Cenário Otimista</div><div class="kpi-val" style="color:var(--ok)">R$ 5,8M</div><div class="kpi-sub pos">+38% crescimento</div></div>
+      <div class="kpi" style="border-left:3px solid var(--o)"><div class="kpi-lbl">Cenário Base</div><div class="kpi-val" style="color:var(--o)">R$ 4,9M</div><div class="kpi-sub warn">Mais provável</div></div>
+      <div class="kpi" style="border-left:3px solid var(--er)"><div class="kpi-lbl">Cenário Conservador</div><div class="kpi-val" style="color:var(--er)">R$ 4,1M</div><div class="kpi-sub neg">Risco alto</div></div>
+      <div class="kpi" style="border-left:3px solid var(--wa)"><div class="kpi-lbl">Break-even</div><div class="kpi-val" style="color:var(--wa)">R$ 3,4M</div><div class="kpi-sub warn">Ponto de equilíbrio</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><i class="ti ti-chart-line"></i>Projeção 12 meses — 3 Cenários</div>
+      <div style="position:relative;height:240px"><canvas id="prevChart" role="img" aria-label="Projeção 12 meses"></canvas></div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-orange" onclick="askCFO('Com base no faturamento atual da Jet Telecom, crie uma projeção estratégica detalhada para os próximos 12 meses com ações prioritárias por trimestre')"><i class="ti ti-robot"></i>Projeção personalizada pelo CFO IA</button>
+      <button class="btn btn-ghost" onclick="askCFO('Quais são os principais riscos financeiros da Jet Telecom para os próximos 6 meses e como mitigá-los?')"><i class="ti ti-shield"></i>Análise de riscos</button>
+    </div>
+  </div>
+
+  <!-- ════ NEGOCIAÇÃO ════ -->
+  <div class="page" id="page-negociacao">
+    <div class="row-2-eq">
+      <div class="card">
+        <div class="card-title"><i class="ti ti-receipt"></i>Potencial de Economia</div>
+        <div style="font-size:30px;font-weight:800;color:var(--o);margin:8px 0">R$ 127K/mês</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.6">Identificado em 4 contratos renegociáveis nos próximos 60 dias</div>
+        <button class="btn btn-orange" style="margin-top:12px;width:100%;justify-content:center" onclick="askCFO('Elabore uma estratégia detalhada para reduzir R$ 127K mensais nos contratos do Grupo Jet, com argumentos e abordagem para cada fornecedor')"><i class="ti ti-robot"></i>Estratégia de negociação IA</button>
+      </div>
+      <div class="card">
+        <div class="card-title"><i class="ti ti-users"></i>Top Inadimplentes</div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--er)"></div><div style="flex:1"><div class="nm">Distribuidora XYZ</div></div><div><div class="prio-val vneg">R$ 184K</div><div style="font-size:10px;color:var(--muted)">92 dias</div></div><button class="act-btn" onclick="askCFO('Crie proposta de renegociação para Distribuidora XYZ com 92 dias de atraso e débito de R$ 184.000')"><i class="ti ti-robot"></i></button></div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--wa)"></div><div style="flex:1"><div class="nm">Transportes MG</div></div><div><div class="prio-val vwa">R$ 96K</div><div style="font-size:10px;color:var(--muted)">47 dias</div></div><button class="act-btn" onclick="askCFO('Proposta de renegociação para Transportes MG com 47 dias de atraso e débito R$ 96.000')"><i class="ti ti-robot"></i></button></div>
+        <div class="prio-item"><div class="prio-dot" style="background:var(--wa)"></div><div style="flex:1"><div class="nm">Armazéns Norte</div></div><div><div class="prio-val vwa">R$ 52K</div><div style="font-size:10px;color:var(--muted)">31 dias</div></div><button class="act-btn" onclick="askCFO('Abordagem de cobrança para Armazéns Norte com 31 dias de atraso e débito R$ 52.000')"><i class="ti ti-robot"></i></button></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><i class="ti ti-file-text"></i>Contratos para Renegociar</div>
+      <div class="tbl-wrap">
+        <table class="tbl">
+          <thead><tr><th>Contrato</th><th>Valor Atual</th><th>Meta de Redução</th><th>Vencimento</th><th>Economia/mês</th><th>Ação IA</th></tr></thead>
+          <tbody>
+            <tr><td><div class="nm">Combustível — Posto Central</div></td><td>R$ 210K/mês</td><td>-8% → R$ 193K</td><td>Jun/25</td><td style="color:var(--ok);font-weight:700">R$ 17K</td><td><button class="btn btn-ghost" style="font-size:11px;padding:5px 10px" onclick="askCFO('Elabore proposta de negociação para reduzir contrato de combustível em 8%, argumentando volume e fidelidade')"><i class="ti ti-robot"></i>Proposta IA</button></td></tr>
+            <tr><td><div class="nm">Seguro Frota Completa</div></td><td>R$ 42K/mês</td><td>-12% → R$ 37K</td><td>Ago/25</td><td style="color:var(--ok);font-weight:700">R$ 5K</td><td><button class="btn btn-ghost" style="font-size:11px;padding:5px 10px" onclick="askCFO('Estratégia para renegociar seguro de frota buscando 12% de redução')"><i class="ti ti-robot"></i>Proposta IA</button></td></tr>
+            <tr><td><div class="nm">Terceirização TI</div></td><td>R$ 18K/mês</td><td>-15% → R$ 15K</td><td>Jul/25</td><td style="color:var(--ok);font-weight:700">R$ 3K</td><td><button class="btn btn-ghost" style="font-size:11px;padding:5px 10px" onclick="askCFO('Argumentos para renegociar contrato de TI com redução de 15%')"><i class="ti ti-robot"></i>Proposta IA</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ CFO IA ════ -->
+  <div class="page" id="page-cfo">
+    <div class="chat-wrap">
+      <div class="chat-header">
+        <div class="chat-avatar"><i class="ti ti-robot"></i></div>
+        <div>
+          <div style="font-size:14px;font-weight:700">Maxwell CFO · IA Estratégica</div>
+          <div style="font-size:12px;color:var(--muted)">Diretor Financeiro Virtual · Grupo Jet</div>
+        </div>
+        <div class="chat-status"><div class="cfo-online"></div>Online · Analisando dados</div>
+      </div>
+      <div class="quick-chips" id="qchips">
+        <div class="qchip" onclick="askCFO('Qual é a saúde financeira atual do Grupo Jet?')">Saúde financeira</div>
+        <div class="qchip" onclick="askCFO('Quais pagamentos priorizar esta semana?')">Priorizar pagamentos</div>
+        <div class="qchip" onclick="askCFO('Como melhorar a margem líquida?')">Melhorar margem</div>
+        <div class="qchip" onclick="askCFO('Estratégia para reduzir inadimplência')">Reduzir inadimplência</div>
+        <div class="qchip" onclick="askCFO('Cenários de crescimento para 6 meses')">Projeção 6 meses</div>
+        <div class="qchip" onclick="askCFO('Analise os riscos financeiros do Grupo Jet')">Riscos financeiros</div>
+      </div>
+      <div class="chat-area" id="chatArea">
+        <div class="msg ai">
+          <div class="msg-av"><i class="ti ti-robot"></i></div>
+          <div class="bubble">Olá! Sou o <strong>Maxwell</strong>, seu Diretor Financeiro IA do Grupo Jet. 👋<br><br>Analiso suas finanças, crio estratégias de pagamento e negociação, e apoio decisões críticas com base no faturamento. Use os atalhos acima ou faça qualquer pergunta financeira. O que analisamos hoje?</div>
+        </div>
+      </div>
+      <div class="chat-input-row">
+        <textarea class="chat-textarea" id="chatInput" placeholder="Faça uma pergunta financeira..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}"></textarea>
+        <button class="chat-send" id="chatSend" onclick="sendChat()" aria-label="Enviar"><i class="ti ti-send"></i></button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+// ── NAV ──
+const TITLES={dashboard:'Dashboard Financeiro',clientes:'Clientes & Carteira',extratos:'Extratos Bancários',planilhas:'Importar Planilhas',pagamentos:'Contas a Pagar',previsao:'Previsão Estratégica',negociacao:'Negociação',cfo:'Diretor CFO · IA'};
+function nav(id,el){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.sb-item').forEach(i=>i.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.getElementById('page-title').textContent=TITLES[id]||id;
+  if(el)el.classList.add('active');
+  else document.querySelectorAll('.sb-item').forEach(i=>{if(i.getAttribute('onclick')&&i.getAttribute('onclick').includes("'"+id+"'"))i.classList.add('active')});
+}
+document.getElementById('hoje-date').textContent=new Date().toLocaleDateString('pt-BR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+
+// ── UTILS ──
+const R=v=>'R$ '+Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fD=s=>{if(!s)return'—';if(typeof s==='number'){const d=new Date(Math.round((s-25569)*86400*1000));return isNaN(d)?s:d.toLocaleDateString('pt-BR')}const d=new Date(s);return isNaN(d)?String(s):d.toLocaleDateString('pt-BR')};
+const ev=e=>e.preventDefault();
+const CORES=['#2980B9','#E74C3C','#27AE60','#F39C12','#8E44AD','#16A085','#D35400','#2C3E50'];
+const cor=n=>{let h=0;for(const c of n)h=(h*31+c.charCodeAt(0))&0xFFFFFF;return CORES[Math.abs(h)%CORES.length]};
+const ini=n=>{const p=n.trim().split(' ');return(p[0][0]+(p[p.length-1][0]||'')).toUpperCase()};
+const parseVal=v=>{if(!v&&v!==0)return 0;const s=String(v).replace(/[R$\s]/g,'').replace(/\./g,'').replace(',','.');return parseFloat(s)||0};
+function pill(s){
+  const m={ativo:'p-ok',active:'p-ok',inadimplente:'p-er',delinquent:'p-er',suspenso:'p-wa',suspended:'p-wa',cancelado:'p-gr',vencida:'p-er',pago:'p-ok','a vencer':'p-wa','vence hoje':'p-er','em dia':'p-ok'};
+  const l={ativo:'Ativo',inadimplente:'Inadimplente',suspenso:'Suspenso',cancelado:'Cancelado',vencida:'Vencida',pago:'Pago','a vencer':'A vencer','vence hoje':'Hoje','em dia':'Em dia'};
+  const k=(s||'').toLowerCase();
+  return`<span class="pill ${m[k]||'p-gr'}">${l[k]||s||'—'}</span>`;
+}
+
+// ── CHARTS ──
+setTimeout(()=>{
+  const orange='#F05A22';
+  const opts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
+
+  new Chart(document.getElementById('fluxoChart'),{type:'line',data:{labels:['Dez','Jan','Fev','Mar','Abr','Mai'],datasets:[{label:'Receitas',data:[3800,3600,4100,3900,4200,4200],borderColor:orange,backgroundColor:'rgba(240,90,34,.07)',fill:true,tension:.4,borderWidth:2,pointRadius:3},{label:'Despesas',data:[3100,3300,3500,3200,3400,3500],borderColor:'#999',backgroundColor:'rgba(153,153,153,.04)',fill:true,tension:.4,borderWidth:1.5,pointRadius:3}]},options:{...opts,plugins:{legend:{display:true,position:'bottom',labels:{font:{size:11},color:'#666',boxWidth:10}}},scales:{y:{ticks:{callback:v=>'R$'+v/1000+'K',font:{size:11}},grid:{color:'rgba(0,0,0,.04)'}},x:{grid:{display:false},ticks:{font:{size:11}}}}}});
+
+  new Chart(document.getElementById('receitaChart'),{type:'doughnut',data:{labels:['Frete Nacional','Frete Interestadual','Armazenagem','Serviços'],datasets:[{data:[52,24,16,8],backgroundColor:[orange,'#888','#BBB','#DDD'],borderWidth:0}]},options:{...opts,plugins:{legend:{display:true,position:'bottom',labels:{font:{size:11},color:'#666',boxWidth:10}}},cutout:'65%'}});
+
+  new Chart(document.getElementById('prevChart'),{type:'line',data:{labels:['Jun','Jul','Ago','Set','Out','Nov','Dez','Jan','Fev','Mar','Abr','Mai'],datasets:[{label:'Otimista',data:[4500,4700,4900,5100,5300,5500,5600,5700,5800,5850,5900,5800],borderColor:'#27AE60',borderDash:[5,3],tension:.4,borderWidth:1.5,pointRadius:2},{label:'Base',data:[4200,4300,4400,4600,4700,4800,4850,4900,4950,4900,4950,4900],borderColor:orange,tension:.4,borderWidth:2.5,pointRadius:3},{label:'Conservador',data:[3900,3800,4000,4100,4100,4200,4100,4100,4200,4100,4150,4100],borderColor:'#E74C3C',borderDash:[3,3],tension:.4,borderWidth:1.5,pointRadius:2}]},options:{...opts,plugins:{legend:{display:true,position:'bottom',labels:{font:{size:11},color:'#666',boxWidth:10}}},scales:{y:{ticks:{callback:v=>'R$'+v/1000+'K',font:{size:10}},grid:{color:'rgba(0,0,0,.04)'}},x:{grid:{display:false},ticks:{font:{size:11}}}}}});
+},200);
+
+// ── BANCO SELECT ──
+let selectedBanco='BTG Pactual';
+function selBanco(el,nome){document.querySelectorAll('.banco-opt').forEach(o=>o.classList.remove('sel'));el.classList.add('sel');selectedBanco=nome}
+
+// ── EXTRATOS ──
+let extFiles=[];
+function onDropExt(e){e.preventDefault();document.getElementById('dropExt').classList.remove('drag');onFilesExt(e.dataTransfer.files)}
+function onFilesExt(files){for(const f of files){if(!extFiles.find(x=>x.name===f.name))extFiles.push(f)}renderExtChips()}
+function renderExtChips(){
+  const list=document.getElementById('extFileList');
+  if(!extFiles.length){list.innerHTML='';document.getElementById('btnAnaliseExt').style.display='none';return}
+  list.innerHTML=extFiles.map((f,i)=>`<div class="file-chip"><div class="chip-ico"><i class="ti ti-file-spreadsheet"></i></div><div class="chip-info"><div class="chip-name">${f.name}</div><div class="chip-size">${(f.size/1024).toFixed(0)} KB</div></div><button class="chip-del" onclick="remExt(${i})"><i class="ti ti-x"></i></button></div>`).join('');
+  document.getElementById('btnAnaliseExt').style.display='flex';
+  document.getElementById('dropExt').classList.add('has-file');
+}
+function remExt(i){extFiles.splice(i,1);if(!extFiles.length)document.getElementById('dropExt').classList.remove('has-file');renderExtChips()}
+
+async function analisarExtrato(){
+  const btn=document.getElementById('btnAnaliseExt');
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i>Analisando...';
+  const ra=document.getElementById('extResult');
+  ra.innerHTML=`<div class="ld-wrap"><div class="ld-dots"><span></span><span></span><span></span></div><span style="font-size:12px">CFO IA lendo extrato...</span></div>`;
+  ra.style.cssText='';
+  const dtI=document.getElementById('extDtI').value;
+  const dtF=document.getElementById('extDtF').value;
+  const emp=document.getElementById('extEmp').value||'Grupo Jet';
+  const tipo=document.getElementById('extTipo').value;
+  let content=[];
+  for(const f of extFiles){
+    try{
+      const r=await new Promise((res,rej)=>{const rd=new FileReader();const ext=f.name.split('.').pop().toLowerCase();if(ext==='pdf'){rd.onload=e=>res({type:'pdf',data:e.target.result.split(',')[1]});rd.readAsDataURL(f)}else{rd.onload=e=>res({type:'text',data:e.target.result});rd.readAsText(f,'UTF-8')};rd.onerror=rej});
+      if(r.type==='pdf')content.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:r.data}});
+      else content.push({type:'text',text:`Arquivo: ${f.name}\n${r.data.substring(0,5000)}`});
+    }catch(e){}
+  }
+  const sys=`Você é Maxwell, CFO IA do Grupo Jet. Analise o extrato bancário. Empresa: ${emp}. Banco: ${selectedBanco}. Período: ${dtI} a ${dtF}. Análise: ${tipo}. Responda APENAS JSON sem markdown:{"resumo":{"entradas":"R$ X","saidas":"R$ X","saldo":"R$ X","transacoes":0},"insights":["..."],"alertas":[{"tipo":"danger|warn|success","texto":"..."}],"recomendacoes":["..."],"transacoes_destaque":[{"desc":"...","valor":"R$ X","tipo":"entrada|saida","data":"DD/MM"}],"parecer":"3-4 frases executivas."}`;
+  content.push({type:'text',text:'Responda apenas JSON.'});
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:sys,messages:[{role:'user',content}]})});
+    const d=await resp.json();
+    let j;try{j=JSON.parse(d.content?.map(c=>c.text||'').join('').replace(/```json|```/g,'').trim())}catch(e){j={resumo:{entradas:'—',saidas:'—',saldo:'—',transacoes:0},insights:[],alertas:[{tipo:'warn',texto:'Arquivo não interpretado. Tente CSV ou TXT.'}],recomendacoes:[],transacoes_destaque:[],parecer:'Não foi possível processar o arquivo. Exporte como CSV do internet banking.'}}
+    const r=j.resumo||{};
+    const alertBg={danger:'var(--er-bg)',warn:'var(--wa-bg)',success:'var(--ok-bg)'};
+    const alertColor={danger:'var(--er)',warn:'var(--wa)',success:'var(--ok)'};
+    ra.innerHTML=`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+        <div style="background:var(--ok-bg);border-radius:8px;padding:10px 12px"><div style="font-size:10px;color:var(--ok);font-weight:600;text-transform:uppercase;margin-bottom:3px">Entradas</div><div style="font-size:16px;font-weight:700;color:var(--ok)">${r.entradas||'—'}</div></div>
+        <div style="background:var(--er-bg);border-radius:8px;padding:10px 12px"><div style="font-size:10px;color:var(--er);font-weight:600;text-transform:uppercase;margin-bottom:3px">Saídas</div><div style="font-size:16px;font-weight:700;color:var(--er)">${r.saidas||'—'}</div></div>
+        <div style="background:var(--light);border-radius:8px;padding:10px 12px"><div style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;margin-bottom:3px">Saldo período</div><div style="font-size:16px;font-weight:700">${r.saldo||'—'}</div></div>
+        <div style="background:var(--light);border-radius:8px;padding:10px 12px"><div style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;margin-bottom:3px">Transações</div><div style="font-size:16px;font-weight:700">${r.transacoes||0}</div></div>
+      </div>
+      <div class="insight-box" style="margin-bottom:10px">${j.parecer||''}</div>
+      ${(j.alertas||[]).map(a=>`<div style="display:flex;gap:8px;padding:8px 11px;border-radius:7px;background:${alertBg[a.tipo]||alertBg.warn};margin-bottom:6px;font-size:12px;color:${alertColor[a.tipo]||alertColor.warn};line-height:1.5"><i class="ti ti-alert-circle" style="flex-shrink:0"></i>${a.texto}</div>`).join('')}
+      ${j.transacoes_destaque?.length?`<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:10px 0 6px">Transações em destaque</div>${j.transacoes_destaque.slice(0,5).map(t=>{const isE=t.tipo==='entrada';return`<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;background:var(--light);margin-bottom:5px;font-size:11px"><div style="width:22px;height:22px;border-radius:5px;background:${isE?'var(--ok-bg)':'var(--er-bg)'};color:${isE?'var(--ok)':'var(--er)'};display:flex;align-items:center;justify-content:center"><i class="ti ti-${isE?'arrow-down-left':'arrow-up-right'}"></i></div><div style="flex:1;font-weight:600">${t.desc||''}</div><div style="color:var(--muted)">${t.data||''}</div><div style="font-weight:700;color:${isE?'var(--ok)':'var(--er)'}">${t.valor||''}</div></div>`}).join('')}`:''}
+      ${(j.recomendacoes||[]).length?`<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:10px 0 6px">Recomendações CFO</div>${j.recomendacoes.map((r,i)=>`<div style="display:flex;gap:8px;margin-bottom:7px"><div style="width:20px;height:20px;border-radius:50%;background:var(--o);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">${i+1}</div><div style="font-size:12px;line-height:1.5">${r}</div></div>`).join('')}`:''}
+      <div style="display:flex;gap:7px;margin-top:10px">
+        <button class="btn btn-orange" style="flex:1;justify-content:center;font-size:11px" onclick="askCFO('Plano de ação para os próximos 30 dias com base no extrato do ${selectedBanco}')"><i class="ti ti-robot"></i>Plano 30 dias</button>
+        <button class="btn btn-ghost" style="flex:1;justify-content:center;font-size:11px" onclick="askCFO('Analise os riscos identificados no extrato do ${selectedBanco} e sugira medidas preventivas')">Riscos</button>
+      </div>`;
+  }catch(e){ra.innerHTML=`<div style="color:var(--er);font-size:12px;padding:12px">Erro de conexão.</div>`}
+  btn.disabled=false;btn.innerHTML='<i class="ti ti-robot"></i>Analisar com CFO IA';
+}
+
+// ── PLANILHAS ──
+const wbs={hub:null,pag:null};
+const planDados={hub:[],pag:[],inad:[]};
+
+function onDropSheet(e,tp){e.preventDefault();document.getElementById('drop'+cap(tp)).classList.remove('drag');onSheet({files:e.dataTransfer.files},tp)}
+function cap(s){return s.charAt(0).toUpperCase()+s.slice(1)}
+function onSheet(inp,tp){
+  const f=inp.files[0];if(!f)return;
+  const chipEl=document.getElementById('chip'+cap(tp));
+  chipEl.innerHTML=`<div class="file-chip"><div class="chip-ico"><i class="ti ti-file-spreadsheet"></i></div><div class="chip-info"><div class="chip-name">${f.name}</div><div class="chip-size">${(f.size/1024).toFixed(0)} KB</div></div><button class="chip-del" onclick="remSheet('${tp}')"><i class="ti ti-x"></i></button></div>`;
+  document.getElementById('drop'+cap(tp)).classList.add('has-file');
+  const rd=new FileReader();
+  rd.onload=e=>{
+    const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array',cellDates:true});
+    wbs[tp]=wb;
+    const sel=document.getElementById('sheet'+cap(tp));
+    sel.style.display='block';sel.innerHTML='<option value="">— Selecionar aba —</option>';
+    wb.SheetNames.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o)});
+    if(wb.SheetNames.length===1){sel.value=wb.SheetNames[0];lerSheet(tp)}
+  };
+  rd.readAsArrayBuffer(f);
+}
+function remSheet(tp){document.getElementById('drop'+cap(tp)).classList.remove('has-file');document.getElementById('chip'+cap(tp)).innerHTML='';document.getElementById('sheet'+cap(tp)).style.display='none';wbs[tp]=null;planDados[tp]=[];checarBtnPlan()}
+function lerSheet(tp){
+  const sel=document.getElementById('sheet'+cap(tp));
+  if(!sel.value||!wbs[tp])return;
+  const rows=XLSX.utils.sheet_to_json(wbs[tp].Sheets[sel.value],{defval:'',raw:false,dateNF:'dd/mm/yyyy'});
+  if(tp==='hub')processarHubSheet(rows);
+  else processarPagSheet(rows);
+  checarBtnPlan();
+}
+
+function detectCol(rows,...terms){
+  if(!rows.length)return null;
+  const norm=s=>s.toLowerCase().replace(/[\s_\-\.\/]/g,'');
+  const keys=Object.keys(rows[0]);
+  const t=terms.map(norm);
+  return keys.find(k=>t.some(x=>norm(k).includes(x)))||null;
+}
+
+function processarHubSheet(rows){
+  const cn=(...t)=>detectCol(rows,...t);
+  planDados.hub=rows.map((r,i)=>({
+    nome:r[cn('nome','razaosocial','cliente','name')]||'Linha '+(i+1),
+    doc:r[cn('cpf','cnpj','documento')]||'—',
+    plano:r[cn('plano','plan','contrato','produto','servico')]||'—',
+    mensalidade:parseVal(r[cn('mensalidade','valor','value','amount','mensal')]),
+    status:(r[cn('status','situacao','estado')]||'ativo').toString().toLowerCase(),
+    vencimento:r[cn('vencimento','vencto','duedate','dia')]||'—',
+    cidade:r[cn('cidade','city','municipio')]||'—',
+    dias:parseInt(r[cn('diasatraso','dias','atraso')]||0),
+    valorAberto:parseVal(r[cn('valoraberto','aberto','debito','saldo')])
+  }));
+  const inad=planDados.hub.filter(c=>c.status.includes('inad')||c.dias>0||c.valorAberto>0);
+  planDados.inad=inad;
+  const totFat=planDados.hub.reduce((s,c)=>s+c.mensalidade,0);
+  document.getElementById('pk1').textContent=planDados.hub.length;
+  document.getElementById('pk1s').textContent=planDados.hub.filter(c=>c.status.includes('ativ')).length+' ativos';
+  document.getElementById('pk2').textContent=R(totFat);
+  document.getElementById('pk2s').textContent=planDados.hub.length+' registros';
+  document.getElementById('pk3').textContent=inad.length;
+  document.getElementById('pk3s').textContent=R(inad.reduce((s,c)=>s+(c.valorAberto||c.mensalidade),0));
+  document.getElementById('kpiPlan').style.display='grid';
+  document.getElementById('ptc1').textContent=planDados.hub.length;
+  document.getElementById('ptc2').textContent=inad.length;
+  renderHubTable(planDados.hub);
+  renderInadTable(inad);
+  sincronizarClientes(planDados.hub);
+}
+
+function renderHubTable(rows){
+  if(!rows.length)return;
+  document.getElementById('epHub').style.display='none';
+  document.getElementById('tPHub').style.display='table';
+  const cols=Object.keys(rows[0]||{}).slice(0,7);
+  document.getElementById('thHub').innerHTML='<tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
+  document.getElementById('tbHub').innerHTML=rows.slice(0,300).map(r=>'<tr>'+cols.map(c=>`<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r[c]||'—'}</td>`).join('')+'</tr>').join('');
+}
+
+function renderInadTable(inad){
+  if(!inad.length)return;
+  document.getElementById('epInad').style.display='none';
+  document.getElementById('tPInad').style.display='table';
+  const risco=d=>d>90?['p-er','Alto']:d>30?['p-wa','Médio']:['p-bl','Baixo'];
+  document.getElementById('tbInad').innerHTML=inad.sort((a,b)=>(b.valorAberto||0)-(a.valorAberto||0)).slice(0,200).map(c=>{const[pc,lr]=risco(c.dias);return`<tr><td><div class="nm">${c.nome}</div><div class="sid">${c.doc}</div></td><td style="color:var(--er);font-weight:600">${R(c.valorAberto||c.mensalidade)}</td><td style="color:${c.dias>30?'var(--er)':'var(--wa)'};font-weight:700">${c.dias||'—'}d</td><td><span class="pill ${pc}">${lr}</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Proposta de renegociação para ${c.nome.replace(/['"]/g,'')} com débito ${R(c.valorAberto||c.mensalidade)} e ${c.dias} dias atraso')"><i class="ti ti-robot"></i></button></div></td></tr>`}).join('');
+}
+
+function processarPagSheet(rows){
+  const cn=(...t)=>detectCol(rows,...t);
+  const hoje=new Date();hoje.setHours(0,0,0,0);
+  planDados.pag=rows.map((r,i)=>{
+    const nome=r[cn('fornecedor','supplier','nome','beneficiario','empresa','name')]||'Linha '+(i+1);
+    const valor=parseVal(r[cn('valor','value','amount','total')]);
+    const vencRaw=r[cn('vencimento','vencto','duedate','dataevenc','venc','prazo')];
+    let vd=null;if(vencRaw){try{vd=new Date(vencRaw);if(isNaN(vd))vd=null}catch(e){}}
+    const diff=vd?Math.ceil((vd-hoje)/86400000):null;
+    const pago=(r[cn('status','situacao','pago','paid')]||'').toString().toLowerCase().includes('pag');
+    return{nome,valor,vencRaw,diff,status:pago?'pago':diff===null?'—':diff<0?'vencida':diff===0?'vence hoje':diff<=7?'a vencer':'em dia',categoria:r[cn('categoria','category','tipo','natureza')]||'—'};
+  });
+  const totPag=planDados.pag.reduce((s,r)=>s+r.valor,0);
+  const vencidas=planDados.pag.filter(r=>r.status==='vencida');
+  document.getElementById('pk4').textContent=R(totPag);
+  document.getElementById('pk4s').textContent=vencidas.length+' vencidas';
+  document.getElementById('kpiPlan').style.display='grid';
+  document.getElementById('ptc3').textContent=planDados.pag.length;
+  renderPagTable(planDados.pag);
+}
+
+function renderPagTable(pag){
+  if(!pag.length)return;
+  document.getElementById('epPag').style.display='none';
+  document.getElementById('tPPag').style.display='table';
+  const stPill={vencida:'p-er','vence hoje':'p-er','a vencer':'p-wa','em dia':'p-ok',pago:'p-ok'};
+  const prior={vencida:'p-er','vence hoje':'p-er','a vencer':'p-wa','em dia':'p-ok'};
+  const priorLbl={vencida:'Urgente','vence hoje':'Hoje','a vencer':'Esta semana','em dia':'Normal'};
+  document.getElementById('tbPag').innerHTML=pag.filter(r=>r.status!=='pago').sort((a,b)=>{const o={vencida:0,'vence hoje':1,'a vencer':2,'em dia':3};return(o[a.status]||9)-(o[b.status]||9)||(b.valor-a.valor)}).slice(0,200).map(r=>`<tr><td><div class="nm">${r.nome}</div><div class="sid">${r.categoria!=='—'?r.categoria:''}</div></td><td style="font-weight:600;color:${r.status==='vencida'?'var(--er)':r.status==='a vencer'?'var(--wa)':''}">${R(r.valor)}</td><td style="font-size:11px">${fD(r.vencRaw)}</td><td>${pill(r.status)}</td><td><span class="pill ${prior[r.status]||'p-gr'}">${priorLbl[r.status]||'Normal'}</span></td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Analise conta a pagar de ${r.nome.replace(/['"]/g,'')} no valor ${R(r.valor)}, status ${r.status}. Sugira como negociar.')"><i class="ti ti-robot"></i></button></div></td></tr>`).join('');
+}
+
+function sincronizarClientes(clientes){
+  document.getElementById('cli-k1').textContent=clientes.length;
+  document.getElementById('cli-k1s').textContent=clientes.filter(c=>c.status.includes('ativ')).length+' ativos';
+  const totFat=clientes.reduce((s,c)=>s+c.mensalidade,0);
+  document.getElementById('cli-k2').textContent=R(totFat);
+  const inad=clientes.filter(c=>c.status.includes('inad')||c.dias>0);
+  document.getElementById('cli-k3').textContent=inad.length;
+  document.getElementById('cli-k3s').textContent=R(inad.reduce((s,c)=>s+(c.valorAberto||c.mensalidade),0));
+  const rec=clientes.filter(c=>!c.status.includes('inad'));
+  document.getElementById('cli-k4').textContent=R(rec.reduce((s,c)=>s+c.mensalidade,0)*.87);
+  renderCliTable(clientes);
+}
+
+function renderCliTable(lista){
+  const sp={ativo:'p-ok',inadimplente:'p-er',suspenso:'p-wa',cancelado:'p-gr'};
+  document.getElementById('tbCli').innerHTML=lista.slice(0,500).map(c=>`<tr><td><div class="cell-name"><div class="av" style="background:${cor(c.nome)}">${ini(c.nome)}</div><div><div class="nm">${c.nome}</div><div class="sid">${c.doc}</div></div></div></td><td style="font-size:11px">${c.plano}</td><td style="font-weight:600">${c.mensalidade>0?R(c.mensalidade):'—'}</td><td><span class="pill ${sp[c.status]||'p-gr'}">${c.status}</span></td><td style="color:var(--muted)">Dia ${c.vencimento}</td><td style="font-size:11px;color:var(--muted)">${c.cidade}</td><td><div class="row-act"><button class="act-btn" onclick="askCFO('Analise o cliente ${c.nome.replace(/['"]/g,'')} (${c.doc}), status ${c.status}, plano ${c.plano}, mensalidade ${R(c.mensalidade)}')"><i class="ti ti-robot"></i></button></div></td></tr>`).join('');
+}
+
+function filtrarCli(){
+  const q=document.getElementById('cliSearch').value.toLowerCase();
+  const st=document.getElementById('cliStatus').value;
+  renderCliTable(planDados.hub.filter(c=>{
+    const mq=!q||c.nome.toLowerCase().includes(q)||(c.doc||'').includes(q);
+    const ms=!st||c.status.includes(st);
+    return mq&&ms;
+  }));
+}
+
+function swPlan(id,el){
+  document.querySelectorAll('#page-planilhas .tab').forEach(t=>t.classList.remove('act'));
+  document.querySelectorAll('.sub-panel').forEach(p=>p.classList.remove('act'));
+  el.classList.add('act');
+  document.getElementById('spp-'+id).classList.add('act');
+}
+
+function checarBtnPlan(){
+  const ok=planDados.hub.length>0||planDados.pag.length>0;
+  document.getElementById('btnAnalisePlan').disabled=!ok;
+}
+
+async function analisarPlanilhas(){
+  const btn=document.getElementById('btnAnalisePlan');
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i>Analisando...';
+  swPlan('res',document.querySelectorAll('#page-planilhas .tab')[3]);
+  const resEl=document.getElementById('planRes');
+  const epRes=document.getElementById('epRes');
+  epRes.innerHTML=`<div class="ld-wrap"><div class="ld-dots"><span></span><span></span><span></span></div><span style="font-size:12px">CFO Maxwell analisando planilhas...</span></div>`;
+  const totFat=planDados.hub.reduce((s,c)=>s+c.mensalidade,0);
+  const totInad=planDados.inad.reduce((s,c)=>s+(c.valorAberto||c.mensalidade||0),0);
+  const totPag=planDados.pag.reduce((s,r)=>s+r.valor,0);
+  const totVenc=planDados.pag.filter(r=>r.status==='vencida').reduce((s,r)=>s+r.valor,0);
+  const t5inad=planDados.inad.slice(0,5).map(c=>`${c.nome}: ${R(c.valorAberto||c.mensalidade)} (${c.dias}d)`).join(', ');
+  const t5pag=planDados.pag.filter(r=>r.status==='vencida'||r.status==='vence hoje').slice(0,5).map(r=>`${r.nome}: ${R(r.valor)}`).join(', ');
+  const prompt=`Você é Maxwell, CFO IA do Grupo Jet / Jet Telecom. Dados das planilhas:
+HUBSOFT: ${planDados.hub.length} clientes, faturamento ${R(totFat)}, ${planDados.inad.length} inadimplentes com ${R(totInad)} em aberto. Top: ${t5inad||'nenhum'}
+CONTAS A PAGAR: ${planDados.pag.length} contas, total ${R(totPag)}, vencidas: ${planDados.pag.filter(r=>r.status==='vencida').length} (${R(totVenc)}), a vencer 7d: ${planDados.pag.filter(r=>r.status==='a vencer'||r.status==='vence hoje').length}. Urgentes: ${t5pag||'nenhuma'}
+Gere relatório executivo CFO completo com: 1) Diagnóstico financeiro e risco de liquidez 2) Prioridade de pagamentos 3) Estratégia de cobrança 4) Alertas críticos 5) Projeção 30 dias. Use emojis e estruture com títulos.`;
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:'Você é Maxwell, CFO IA do Grupo Jet. Responda em português do Brasil com análise estratégica profissional.',messages:[{role:'user',content:prompt}]})});
+    const d=await resp.json();
+    const txt=d.content?.map(c=>c.text||'').join('')||'Erro.';
+    epRes.innerHTML='';
+    resEl.style.display='block';
+    resEl.innerHTML=`<div class="insight-box" style="margin-bottom:12px">${txt.replace(/\n\n/g,'<br><br>').replace(/\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')}</div><div style="display:flex;gap:7px;flex-wrap:wrap"><button class="btn btn-orange" style="font-size:11px" onclick="askCFO('Plano de ação detalhado para os próximos 7 dias com base na análise das planilhas da Jet Telecom')"><i class="ti ti-robot"></i>Plano 7 dias</button><button class="btn btn-ghost" style="font-size:11px" onclick="askCFO('Scripts de cobrança WhatsApp para os top inadimplentes da Jet Telecom')"><i class="ti ti-brand-whatsapp"></i>Scripts WhatsApp</button><button class="btn btn-ghost" style="font-size:11px" onclick="askCFO('Simule negociação de prazo com os fornecedores com contas vencidas da Jet Telecom')">Negociar fornecedores</button></div>`;
+  }catch(e){epRes.innerHTML=`<div style="color:var(--er);font-size:12px;padding:12px">Erro de conexão.</div>`}
+  btn.disabled=false;btn.innerHTML='<i class="ti ti-robot"></i>Analisar tudo com CFO IA';
+}
+
+// ── CFO CHAT ──
+const SYS=`Você é Maxwell, Diretor Financeiro (CFO) IA do Grupo Jet / Jet Telecom, empresa brasileira de logística, transporte e telecomunicações. Forneça análises financeiras ESTRATÉGICAS e PRÁTICAS em português do Brasil. Contexto: Faturamento ~R$ 4,2M/mês, inadimplência 4,8%, principais bancos: BTG, Caixa, C6, Safra, Banco do Brasil. Seja objetivo, use números, emojis estratégicos e estruture em tópicos. Máximo 300 palavras.`;
+const chatHist=[];
+
+function askCFO(txt){
+  nav('cfo',null);
+  setTimeout(()=>{document.getElementById('chatInput').value=txt;sendChat()},100);
+}
+
+async function sendChat(){
+  const inp=document.getElementById('chatInput');
+  const txt=inp.value.trim();if(!txt)return;
+  const btn=document.getElementById('chatSend');
+  inp.value='';btn.disabled=true;
+  const area=document.getElementById('chatArea');
+  area.innerHTML+=`<div class="msg user"><div class="msg-av"><i class="ti ti-user"></i></div><div class="bubble">${txt.replace(/</g,'&lt;')}</div></div>`;
+  const think=document.createElement('div');
+  think.className='msg ai';think.id='thinking';
+  think.innerHTML=`<div class="msg-av"><i class="ti ti-robot"></i></div><div class="bubble" style="display:flex;align-items:center;gap:8px;color:var(--muted)"><div class="thinking-dots"><span></span><span></span><span></span></div>Analisando...</div>`;
+  area.appendChild(think);area.scrollTop=area.scrollHeight;
+  chatHist.push({role:'user',content:txt});
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:SYS,messages:chatHist.slice(-20)})});
+    const d=await resp.json();
+    const reply=d.content?.map(c=>c.text||'').join('')||'Erro.';
+    chatHist.push({role:'assistant',content:reply});
+    think.remove();
+    area.innerHTML+=`<div class="msg ai"><div class="msg-av"><i class="ti ti-robot"></i></div><div class="bubble">${reply.replace(/</g,'&lt;').replace(/\n\n/g,'<br><br>').replace(/\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')}</div></div>`;
+  }catch(e){think.remove();area.innerHTML+=`<div class="msg ai"><div class="msg-av"><i class="ti ti-robot"></i></div><div class="bubble" style="color:var(--er)">Erro de conexão. Verifique a chave da API.</div></div>`}
+  btn.disabled=false;area.scrollTop=area.scrollHeight;
+}
+</script>
+</body>
+</html>
