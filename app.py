@@ -494,14 +494,86 @@ def recalc():
         if col_a_pagar and col_a_pagar in (col_val, col_val_liq): col_a_pagar = None
 
         # ═══════════════════════════════════════════════════
-        # PASSO 2 — Remove linhas de total/resumo
-        # (linhas sem fornecedor OU com valores absurdos = linha de subtotal do Hubsoft)
+        # PASSO 2 — Remove linhas de total/resumo e linhas "—"
+        # O Hubsoft adiciona linhas de subtotal sem Razão Social e sem Categoria
+        # Regra: excluir toda linha onde Razão Social OU Categoria esteja vazia/"—"
         # ═══════════════════════════════════════════════════
-        if col_forn:
-            nomes_pag = pag[col_forn].fillna("").astype(str).str.strip()
-            pag = pag[nomes_pag.str.len() >= 2].copy()
+        VAZIOS = {"", "—", "-", "nan", "none", "null", "n/a"}
 
-        # Remove outliers de valor (> 100× o segundo maior valor)
+        # ─── Separa linhas especiais (ex: CAJU) das linhas de total ───
+        # Lógica:
+        #  1. Linhas com Razão Social válida → contas normais
+        #  2. Linhas sem nome/cat MAS com A Pagar em valor razoável
+        #     e rótulo em algum campo (CAJU, CAIXA, etc) → linhas especiais
+        #  3. Linhas sem nome/cat com valor absurdo → subtotais → EXCLUIR
+
+        # Calcula o maior A Pagar esperado (para detectar linhas de total)
+        todos_a_pagar = pag[col_a_pagar].apply(pv) if col_a_pagar else pd.Series([0])
+        max_razoavel  = todos_a_pagar[todos_a_pagar < 500000].sum() * 1.1  # 110% do total razoável
+
+        def eh_linha_especial(row):
+            """Linha sem nome/cat mas com valor razoável — ex: CAJU"""
+            nome_v = str(row.get(col_forn, "")).strip() if col_forn else ""
+            cat_v  = str(row.get(col_cat,  "")).strip() if col_cat  else ""
+            if nome_v.lower() not in VAZIOS and len(nome_v) >= 2: return False  # linha normal
+            if cat_v.lower()  not in VAZIOS and len(cat_v)  >= 2: return False  # linha normal
+
+            # Sem nome E sem categoria — verifica se tem valor razoável
+            apagar_v = pv(row.get(col_a_pagar, 0)) if col_a_pagar else 0
+            if apagar_v <= 0 or apagar_v > 500000: return False  # total ou nulo
+
+            # Procura rótulo em qualquer campo (ex: "CAJU" no col_val_pago)
+            for col in pag.columns:
+                v = str(row.get(col, "")).strip()
+                if v and v.lower() not in VAZIOS and not _is_number(v):
+                    return True  # tem rótulo de texto → linha especial
+            return True  # tem valor mas sem rótulo → inclui mesmo assim
+
+        def _is_number(s):
+            try: float(s.replace(",",".")); return True
+            except: return False
+
+        def get_rotulo(row):
+            """Extrai rótulo da linha especial (ex: 'CAJU')"""
+            for col in pag.columns:
+                v = str(row.get(col, "")).strip()
+                if v and v.lower() not in VAZIOS and not _is_number(v):
+                    return v.upper()
+            return "ESPECIAL"
+
+        # Separa os grupos
+        linhas_normais   = []
+        linhas_especiais = []
+
+        for idx, row in pag.iterrows():
+            nome_v = str(row.get(col_forn, "")).strip() if col_forn else ""
+            cat_v  = str(row.get(col_cat, "")).strip()  if col_cat  else ""
+
+            nome_ok = nome_v.lower() not in VAZIOS and len(nome_v) >= 2
+            cat_ok  = cat_v.lower()  not in VAZIOS and len(cat_v)  >= 2
+
+            if nome_ok and cat_ok:
+                linhas_normais.append(idx)
+            elif eh_linha_especial(row):
+                linhas_especiais.append(idx)
+            # else: subtotal/total → descarta
+
+        pag_normal   = pag.loc[linhas_normais].copy()
+        pag_especial = pag.loc[linhas_especiais].copy()
+
+        # Enriquece linhas especiais com nome/categoria identificados
+        if not pag_especial.empty:
+            if col_forn:
+                pag_especial[col_forn] = pag_especial.apply(
+                    lambda r: get_rotulo(r), axis=1)
+            if col_cat:
+                pag_especial[col_cat] = pag_especial.apply(
+                    lambda r: get_rotulo(r) + " / Pagamento Especial", axis=1)
+
+        # Junta tudo
+        pag = pd.concat([pag_normal, pag_especial], ignore_index=True)
+
+        # Remove outliers residuais (> 100× o segundo maior valor)
         val_ref_col = col_val_liq or col_val or col_a_pagar
         if val_ref_col:
             vals_sorted = pag[val_ref_col].apply(pv).sort_values(ascending=False)
