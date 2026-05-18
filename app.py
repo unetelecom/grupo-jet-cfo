@@ -465,7 +465,7 @@ def dcol(df, *terms):
             if nt in nc: return col
         # 3. Nome da coluna é substring do termo — só se col ≥ 65% do termo
         for col, nc in cols:
-            if nc in nt and len(nc) >= max(4, int(len(nt) * 0.65)): return col
+            if nc in nt and len(nc) >= max(5, int(len(nt) * 0.72)): return col
     return None
 
 def read_file(f):
@@ -1873,32 +1873,30 @@ elif "Importar" in page:
             n_rows  = len(limpar(hub_raw))
             st.success(f"✅ **{n_rows}** registros carregados")
 
-            # ── Diagnóstico automático de colunas ──
-            diag = st.session_state.get("hub_diag", {})
+            # ── Diagnóstico automático de colunas — sem HTML complexo ──
+            diag   = st.session_state.get("hub_diag", {})
             s_prev = st.session_state.stats
 
-            # Validação automática da média
-            media_ok = False
-            media_txt = "—"
-            if s_prev["fat_total"] > 0 and s_prev["n_clientes"] > 0:
-                media = s_prev["fat_total"] / s_prev["n_clientes"]
-                media_ok = 10 <= media <= 50000
-                media_txt = brl(media)
+            # Validação da média por cliente
+            try:
+                fat   = float(s_prev.get("fat_total", 0))
+                ncli  = int(s_prev.get("n_clientes", 0))
+                media = fat / ncli if ncli > 0 else 0.0
+                media_ok  = 10 <= media <= 50000
+                media_str = brl(media)
+            except Exception:
+                media_ok  = False
+                media_str = "—"
 
-            status_cor = "#22A85A" if media_ok else "#D97706"
-            status_ico = "✅" if media_ok else "⚠️"
-            status_msg = "Valores detectados com sucesso" if media_ok else "Verifique — média por cliente parece incorreta"
+            if media_ok:
+                st.success(f"✅ Valores detectados · Média/cliente: **{media_str}**")
+            else:
+                st.warning(f"⚠️ Verifique a coluna de valor · Média/cliente: **{media_str}**")
 
-            st.markdown(f"""
-            <div style='background:#F6F4F1;border-radius:9px;padding:12px 14px;margin-bottom:8px;font-size:12px'>
-                <div style='font-weight:700;color:{status_cor};margin-bottom:6px'>
-                    {status_ico} {status_msg} · Média/cliente: <strong>{media_txt}</strong>
-                </div>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:3px'>
-                    {"".join(f"<div style='color:#555'><span style='color:#888'>▸ {k}:</span> <strong>{v}</strong></div>" for k,v in diag.items())}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            if diag:
+                with st.expander("🔍 Colunas detectadas automaticamente", expanded=False):
+                    for k, v in diag.items():
+                        st.caption(f"**{k}** → `{v}`")
 
             if st.button("🗑️ Remover Hubsoft"):
                 st.session_state.hub_df = None
