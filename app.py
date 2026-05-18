@@ -1092,12 +1092,19 @@ with st.sidebar:
         key="up_pagar",
         help="Planilha com Fornecedor, Categoria, Vencimento, A Pagar"
     )
-    up_receber = st.file_uploader(
-        "📥 Faturamento / A Receber (xlsx/csv)",
-        type=["xlsx","xls","csv"],
-        key="up_receber",
-        help="Planilha Hubsoft com nome_razaosocial, valor, data_vencimento"
-    )
+    _hub_ativo = _HAS_HUB and all([
+        (lambda: (lambda k: (st.secrets.get(k,"") if hasattr(st,"secrets") else ""))("HUBSOFT_CLIENT_SECRET"))()
+    ])
+    if not _hub_ativo:
+        up_receber = st.file_uploader(
+            "📥 Faturamento / A Receber (xlsx/csv)",
+            type=["xlsx","xls","csv"],
+            key="up_receber",
+            help="Planilha Hubsoft com nome_razaosocial, valor, data_vencimento"
+        )
+    else:
+        up_receber = None
+        st.info("📥 Faturamento via **Hubsoft** (automático)", icon="🔗")
 
     up_recebidos = st.file_uploader(
         "✅ Já Recebidos (xlsx/csv/ofx)",
@@ -1174,6 +1181,46 @@ if up_recebidos:
     with st.spinner("Lendo pagamentos já recebidos..."):
         rec_df_recebidos = parse_recebidos(up_recebidos)
 
+# ── AUTO-LOAD DO HUBSOFT ─────────────────────────────────────────────
+# Se credenciais configuradas nos Secrets, carrega automaticamente
+_hub_auto_ok = False
+if _HAS_HUB:
+    def _gs(k, d=""):
+        try: return st.secrets.get(k, d)
+        except: return d
+    _hub_url  = _gs("HUBSOFT_URL",  "https://jettelecom.hubsoft.com.br")
+    _hub_cid  = _gs("HUBSOFT_CLIENT_ID",  "")
+    _hub_csec = _gs("HUBSOFT_CLIENT_SECRET", "")
+    _hub_user = _gs("HUBSOFT_USERNAME", "")
+    _hub_pass = _gs("HUBSOFT_PASSWORD", "")
+    _hub_cred_ok = all([_hub_url, _hub_cid, _hub_csec, _hub_user, _hub_pass])
+
+    if _hub_cred_ok:
+        from datetime import datetime as _dtnow
+        _hub_mes = _dtnow.now().strftime("%Y-%m")
+
+        @st.cache_data(ttl=300, show_spinner=False)
+        def _hub_importar(url, cid, csec, user, pwd, mes):
+            hub = HubsoftAPI(url, cid, csec, user, pwd)
+            hub.autenticar()
+            return hub.importar_tudo(mes)
+
+        try:
+            with st.spinner("🔄 Carregando dados do Hubsoft..."):
+                _hub_data = _hub_importar(
+                    _hub_url, _hub_cid, _hub_csec, _hub_user, _hub_pass, _hub_mes
+                )
+            # Usa dados do Hubsoft como fonte primária (sobrepõe uploads)
+            if not _hub_data["rec_df"].empty:
+                rec_df = _hub_data["rec_df"]
+            if not _hub_data["rec_recebidos"].empty and rec_df_recebidos.empty:
+                rec_df_recebidos = _hub_data["rec_recebidos"]
+            _hub_auto_ok = True
+            _hub_totais  = _hub_data["totais"]
+        except Exception as _hub_err:
+            st.sidebar.warning(f"⚠️ Hubsoft: {str(_hub_err)[:80]}")
+            _hub_auto_ok = False
+
 data_ini_ts = pd.Timestamp(data_ini_input)
 
 # ── Calcula rec_pago ANTES de chamar gerar_agenda ──────────────────
@@ -1242,17 +1289,28 @@ if pag_df.empty:
 # ══════════════════════════════════════════════════════════════════════
 # STATUS DAS PLANILHAS
 # ══════════════════════════════════════════════════════════════════════
-_scols = st.columns(3 if not rec_df_recebidos.empty else 2)
-with _scols[0]:
-    st.success(f"✅ **Contas a Pagar** — {len(pag_df)} contas · {brl(pag_df['__apagar'].sum())}")
-with _scols[1]:
-    if not rec_df.empty:
-        st.success(f"✅ **Faturamento** — {len(rec_df)} cobranças · {brl(rec_df['__val'].sum())}")
-    else:
-        st.warning("⚠️ Planilha de faturamento não importada — entradas serão R$ 0")
-if len(_scols) > 2 and not rec_df_recebidos.empty:
-    with _scols[2]:
-        st.success(f"✅ **Já Recebidos** — {len(rec_df_recebidos)} pagtos · {brl(rec_df_recebidos['__val'].sum())}")
+# Badge da fonte de dados
+if _HAS_HUB and _hub_auto_ok:
+    st.success(
+        f"🔗 **Hubsoft ao vivo** — atualizado em {_hub_totais.get('atualizado_em','?')}  "
+        f"· {_hub_totais.get('n_cobrancas',0)} cobranças  "
+        f"· {_hub_totais.get('n_clientes', len(rec_df.iloc[:,0].unique()) if not rec_df.empty else 0)} clientes",
+    )
+    if st.button("🔄 Atualizar Hubsoft", key="btn_atualiza_hub"):
+        st.cache_data.clear()
+        st.rerun()
+else:
+    _scols = st.columns(3 if not rec_df_recebidos.empty else 2)
+    with _scols[0]:
+        st.success(f"✅ **Contas a Pagar** — {len(pag_df)} contas · {brl(pag_df['__apagar'].sum())}")
+    with _scols[1]:
+        if not rec_df.empty:
+            st.success(f"✅ **Faturamento** — {len(rec_df)} cobranças · {brl(rec_df['__val'].sum())}")
+        else:
+            st.warning("⚠️ Planilha de faturamento não importada — entradas serão R$ 0")
+    if len(_scols) > 2 and not rec_df_recebidos.empty:
+        with _scols[2]:
+            st.success(f"✅ **Já Recebidos** — {len(rec_df_recebidos)} pagtos · {brl(rec_df_recebidos['__val'].sum())}")
 
 # ══════════════════════════════════════════════════════════════════════
 # HEADER — título da agenda
