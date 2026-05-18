@@ -161,13 +161,23 @@ class HubsoftAPI:
                     raise
                 time.sleep(2 ** t)
 
-    def _paginar(self, endpoint, params=None, limit=100, max_pag=200):
+    def _paginar(self, endpoint, params=None, limit=100, max_pag=500):
         p = dict(params or {})
         p["pagina"]          = 0
-        p["itens_por_pagina"]= limit   # Hubsoft usa itens_por_pagina, não limit
+        p["itens_por_pagina"]= limit
         dados = []
-        for _ in range(max_pag):
-            resp  = self._get(endpoint, p)
+        total_esperado = None
+
+        for n_pag in range(max_pag):
+            resp = self._get(endpoint, p)
+            pag  = resp.get("paginacao") or {}
+
+            # Loga totais na primeira chamada
+            if n_pag == 0 and pag:
+                total_esperado = pag.get("total_registros", "?")
+                ultima_pag     = pag.get("ultima_pagina", 0)
+                print(f"  Paginacao: total={total_esperado} paginas={ultima_pag+1} itens/pag={limit}")
+
             bloco = (resp.get("dados") or resp.get("data") or
                      resp.get("clientes") or resp.get("contratos") or
                      resp.get("faturas") or resp.get("cobrancas") or [])
@@ -175,12 +185,16 @@ class HubsoftAPI:
                 dados.extend(bloco)
             elif isinstance(bloco, dict) and bloco:
                 dados.append(bloco)
-            pag    = resp.get("paginacao") or {}
-            ultima = pag.get("ultima_pagina",  0)
-            atual  = pag.get("pagina_atual",   p["pagina"])
+
+            ultima = pag.get("ultima_pagina", 0)
+            atual  = pag.get("pagina_atual",  p["pagina"])
             if not bloco or atual >= ultima:
                 break
             p["pagina"] = atual + 1
+
+        print(f"  Total carregado: {len(dados)} registros")
+        if total_esperado and str(total_esperado).isdigit() and len(dados) < int(total_esperado):
+            print(f"  INCOMPLETO: {len(dados)} de {total_esperado}")
         return dados
 
     def descobrir_endpoints(self):
@@ -420,46 +434,60 @@ class HubsoftAPI:
         d_ini    = f"{mes}-01"              # sempre do dia 1
         d_fim    = f"{mes}-{ult_dia:02d}"  # até o último dia do mês
 
-        # ── ESTRATÉGIA SIMPLES E CONFIÁVEL ───────────────────────────────
-        # 1. Busca TODAS as faturas do mês (sem filtro de status)
-        #    → retorna as pagas por vencimento em maio
-        cob_pagas = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+        # ── ESTRATÉGIA COMPLETA ───────────────────────────────────────────
+        # Busca em paralelo:
+        # A) Faturas com VENCIMENTO no mês (maio 01→31)
+        # B) Faturas ATRASADAS com vencimento em meses anteriores ainda em aberto
+        # C) Combina tudo sem duplicatas
 
-        # 2. Busca as abertas (vencimento em maio, ainda não pagas)
-        cob_abertas = self.get_cobrancas(
-            d_ini, d_fim, tipo_data="vencimento", status_pag="aberto"
-        )
+        print(f"=== HUBSOFT importar_tudo({mes}) ===")
 
-        # 3. Combina sem duplicar
-        if not cob_abertas.empty and not cob_pagas.empty:
-            id_col = "id_cobranca" if "id_cobranca" in cob_pagas.columns else None
-            ids_pagas = set(cob_pagas[id_col].astype(str)) if id_col else set()
-            # Adiciona abertas que não estão nas pagas
-            if id_col:
-                novas = cob_abertas[~cob_abertas[id_col].astype(str).isin(ids_pagas)]
+        # A) Vencimento no mês — sem filtro de status (pega pagas + abertas do mês)
+        print("  Buscando faturas com vencimento no mês...")
+        cob_mes_venc = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+        print(f"  → vencimento no mês: {len(cob_mes_venc)} faturas")
+
+        # B) Faturas em aberto (status=aberto) — período amplo (últimos 12 meses)
+        import datetime as _dt_imp
+        d_ini_hist = ((_dt_imp.datetime.strptime(d_ini, "%Y-%m-%d")
+                       - _dt_imp.timedelta(days=365)).strftime("%Y-%m-%d"))
+        print(f"  Buscando faturas abertas desde {d_ini_hist}...")
+        cob_abertas = self.get_cobrancas(d_ini_hist, d_fim, tipo_data="vencimento",
+                                         status_pag="aberto")
+        print(f"  → abertas (histórico 12m): {len(cob_abertas)} faturas")
+
+        # C) Combina: vencimento_mes + abertas_historico (sem duplicar)
+        id_col = "id_cobranca"
+        if not cob_mes_venc.empty and not cob_abertas.empty:
+            if id_col in cob_mes_venc.columns and id_col in cob_abertas.columns:
+                ids_venc = set(cob_mes_venc[id_col].astype(str))
+                novas_abertas = cob_abertas[
+                    ~cob_abertas[id_col].astype(str).isin(ids_venc)
+                ]
             else:
-                novas = cob_abertas
-            cob_mes = pd.concat([cob_pagas, novas], ignore_index=True)
+                novas_abertas = cob_abertas
+            cob_mes = pd.concat([cob_mes_venc, novas_abertas], ignore_index=True)
         elif not cob_abertas.empty:
             cob_mes = cob_abertas
         else:
-            cob_mes = cob_pagas
+            cob_mes = cob_mes_venc
 
-        # 4. rec_recebidos = faturas classificadas como PAGO
+        # Mantém cob_pagas como referência para classificação
+        cob_pagas = cob_mes_venc
+
+        print(f"  → Total combinado: {len(cob_mes)} faturas")
+
+        # D) rec_recebidos = faturas classificadas como PAGO no cob_mes
         if not cob_mes.empty and "status" in cob_mes.columns:
             cob_rec = cob_mes[cob_mes["status"] == "PAGO"].copy()
-            # Se nenhuma foi classificada como PAGO mas temos faturas,
-            # as faturas do call sem status-filter são implicitamente pagas
             if cob_rec.empty and not cob_pagas.empty:
-                print("  ⚠️  Nenhuma PAGO classificada — tratando cob_pagas como pagas")
+                print("  ⚠️  0 PAGO — usando cob_pagas como fallback")
                 cob_rec = cob_pagas.copy()
                 cob_rec["status"] = "PAGO"
-                cob_rec["__pago"] = True
-                # Atualiza também no rec_df
         else:
             cob_rec = pd.DataFrame()
 
-        print(f"  Pagas(venc): {len(cob_pagas)} | Abertas: {len(cob_abertas)} | Total: {len(cob_mes)}")
+        print(f"  cob_rec (recebidos): {len(cob_rec)}")
         try:    clientes = self.get_clientes("ativo")
         except: clientes = pd.DataFrame()
 
@@ -540,4 +568,3 @@ class HubsoftAPI:
         ).reset_index()
         cli["adimplencia_pct"] = (cli["recebido"]/cli["faturado"].replace(0,1)*100).round(1)
         return cli.sort_values("faturado",ascending=False)
-
