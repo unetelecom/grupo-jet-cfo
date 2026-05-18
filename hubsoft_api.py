@@ -172,20 +172,20 @@ class HubsoftAPI:
             resp = self._get(endpoint, p)
             pag  = resp.get("paginacao") or {}
 
+            # Extrai dados PRIMEIRO
+            bloco = (resp.get("dados") or resp.get("data") or
+                     resp.get("clientes") or resp.get("contratos") or
+                     resp.get("faturas") or resp.get("cobrancas") or [])
+
             # Loga estrutura na primeira chamada
             if n_pag == 0:
                 total_esperado = pag.get("total_registros", "?")
                 ultima_pag     = pag.get("ultima_pagina", 0)
-                # Loga chaves da resposta para diagnóstico
                 resp_keys = list(resp.keys())
                 print(f"  Resp keys: {resp_keys}")
                 print(f"  Paginacao: total={total_esperado} paginas={ultima_pag+1} itens/pag={limit}")
                 if not bloco:
-                    print(f"  ATENÇÃO: bloco vazio! resp={str(resp)[:200]}")
-
-            bloco = (resp.get("dados") or resp.get("data") or
-                     resp.get("clientes") or resp.get("contratos") or
-                     resp.get("faturas") or resp.get("cobrancas") or [])
+                    print(f"  ATENCAO: bloco vazio! resp={str(resp)[:200]}")
             if isinstance(bloco, list):
                 dados.extend(bloco)
             elif isinstance(bloco, dict) and bloco:
