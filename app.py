@@ -220,6 +220,14 @@ CRITICIDADE = {
     "servicos de instalacao":       (3, "🟢 BAIXA", "Pode adiar"),
     "consultoria":                  (3, "🟢 BAIXA", "Pode adiar"),
     "outras despesas":              (3, "🟢 BAIXA", "Avaliar"),
+    "benefícios":                   (1, "🟠 ALTA",  "Benefício equipe"),
+    "beneficios":                   (1, "🟠 ALTA",  "Benefício equipe"),
+    "caju":                         (1, "🟠 ALTA",  "Cartão benefício"),
+    "vale refeição":                (1, "🟠 ALTA",  "Benefício equipe"),
+    "vale refeicao":                (1, "🟠 ALTA",  "Benefício equipe"),
+    "vale transporte":              (1, "🟠 ALTA",  "Benefício equipe"),
+    "plano de saúde":               (1, "🟠 ALTA",  "Benefício equipe"),
+    "plano de saude":               (1, "🟠 ALTA",  "Benefício equipe"),
 }
 
 def get_crit(categoria: str):
@@ -251,15 +259,52 @@ def parse_pagar(uploaded) -> pd.DataFrame:
 
     if df.empty: return df
 
-    # Remove linhas totalizadoras (sem Razão Social ou sem Categoria)
     VAZIOS = {"","—","-","nan","none","null","n/a"}
-    col_forn = dcol(df,"razao_social","razaosocial","fornecedor","nome","razão social")
-    col_cat  = dcol(df,"categoria","category","tipo")
+    col_forn  = dcol(df,"razao_social","razaosocial","fornecedor","nome","razão social")
+    col_cat   = dcol(df,"categoria","category","tipo")
+    col_vpago = dcol(df,"valor_pago","valorpago","pago")
+    col_ap_raw= dcol(df,"a_pagar","apagar","saldo","pendente")
+
+    # ── CASO ESPECIAL: linhas onde Razão Social está vazia mas
+    #    "Valor Pago" contém o nome (ex: CAJU) e "A Pagar" tem um valor real.
+    #    Padrão Hubsoft: benefícios, cartões, linhas fora do padrão.
+    linhas_especiais = []
+    if col_forn and col_vpago and col_ap_raw:
+        sem_razao = df[col_forn].fillna("").astype(str).str.strip().str.len() < 2
+        vpago_texto = df[col_vpago].fillna("").astype(str).str.strip()
+        apagar_val  = df[col_ap_raw].apply(pv)
+
+        mask_especial = (
+            sem_razao &
+            (vpago_texto.str.len() >= 2) &
+            (~vpago_texto.str.lower().isin(VAZIOS)) &
+            # Exclui totalizadores: "TOTAL MAIO", "TOTAL", números puros
+            (~vpago_texto.str.upper().str.startswith("TOTAL")) &
+            (vpago_texto.str.contains("[A-Za-záàãâéêíóôõúüçÁÀÃÂÉÊÍÓÔÕÚÜÇ]", regex=True, na=False)) &
+            (apagar_val > 0)
+        )
+
+        if mask_especial.any():
+            especiais = df[mask_especial].copy()
+            # Usa o texto de "Valor Pago" como Razão Social
+            especiais[col_forn] = especiais[col_vpago].astype(str).str.strip()
+            # Categoria padrão se vazia
+            if col_cat:
+                especiais[col_cat] = especiais[col_cat].fillna("").astype(str).apply(
+                    lambda c: "Benefícios" if c.strip() in ("", "nan") else c
+                )
+            linhas_especiais.append(especiais)
+
+    # Remove totalizadores e linhas inválidas
     if col_forn:
         df = df[~df[col_forn].fillna("").astype(str).str.strip().str.lower().isin(VAZIOS)]
         df = df[df[col_forn].fillna("").astype(str).str.strip().str.len() >= 2]
     if col_cat:
         df = df[~df[col_cat].fillna("").astype(str).str.strip().str.lower().isin(VAZIOS)]
+
+    # Adiciona linhas especiais (CAJU e similares) ao final
+    if linhas_especiais:
+        df = pd.concat([df] + linhas_especiais, ignore_index=True)
 
     # Detecta colunas
     col_vliq   = dcol(df,"valor_liquido","valorliquido","liquido","valor da conta","valor")
