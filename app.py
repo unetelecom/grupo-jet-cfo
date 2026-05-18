@@ -552,82 +552,104 @@ def run_conciliacao(ofx_df, hub_df):
     def _palavras(s):
         return {w for w in _norm(s).split() if len(w) > 3}
 
+
+    # ── Pré-calcula ambiguidade: quantas cobranças têm cada valor ──
+    hub_val_count = {}
+    for v in hub_pend["_val_c"]:
+        rv = round(float(v), 2)
+        hub_val_count[rv] = hub_val_count.get(rv, 0) + 1
+
     # Gera todos os candidatos
     candidatos = []
     for io, ofx_row in ofx_cred.iterrows():
-        vo = ofx_row["valor"]
-        do = ofx_row.get("data", pd.NaT)
-        mo = _norm(str(ofx_row.get("memo", "")))
+        vo       = ofx_row["valor"]
+        do       = ofx_row.get("data", pd.NaT)
+        memo_raw = str(ofx_row.get("memo", "")).upper()
+
+        # Tipo de pagamento + pagante
+        if memo_raw.startswith("BOLETO PAGO POR"):
+            tipo_pag = "BOLETO"
+            pagante  = memo_raw.replace("BOLETO PAGO POR","").strip()[:45]
+        elif memo_raw.startswith("PIX RECEBIDO DE"):
+            tipo_pag = "PIX/TED"
+            pagante  = memo_raw.replace("PIX RECEBIDO DE","").split("|")[0].strip()[:45]
+        elif memo_raw.startswith("TED RECEBIDA DE"):
+            tipo_pag = "PIX/TED"
+            pagante  = memo_raw.replace("TED RECEBIDA DE","").split("|")[0].strip()[:45]
+        else:
+            tipo_pag = "OUTRO"
+            pagante  = str(ofx_row.get("memo",""))[:45]
+
+        pagante_pw = _palavras(pagante)
 
         for ih, hub_row in hub_pend.iterrows():
-            vh = hub_row["_val_c"]
+            vh       = hub_row["_val_c"]
             if vh <= 0: continue
-
-            # Match de valor (1.5% tolerância)
             diff_pct = abs(vo - vh) / max(vh, 0.01)
-            if diff_pct > 0.015: continue
+            if diff_pct > 0.008: continue  # tolerância 0.8%
 
-            # Match de data (±20 dias) — robusto a tipos mistos
+            # Data vencimento vs data pagamento
             dd = 999
             try:
-                venc_c = hub_row["_venc_c"]
-                if pd.notna(venc_c) and pd.notna(do):
-                    diff = pd.Timestamp(do) - pd.Timestamp(venc_c)
-                    dd = abs(int(diff.total_seconds() / 86400))
+                if pd.notna(hub_row["_venc_c"]) and pd.notna(do):
+                    diff_dt = pd.Timestamp(do) - pd.Timestamp(hub_row["_venc_c"])
+                    dd = abs(int(diff_dt.total_seconds() / 86400))
             except Exception:
                 dd = 999
-            if dd > 20: continue
+            if dd > 20: continue  # limite absoluto
 
-            # ── Tipo de pagamento: regra de nome diferente para boleto ──
-            memo_raw = str(ofx_row.get("memo", "")).upper()
-            if memo_raw.startswith("BOLETO PAGO POR"):
-                tipo_pag = "BOLETO"
-                # Para boleto: pagante ≠ cliente → nome NÃO é critério confiável
-                # Extrai o nome do pagante do memo para exibição
-                pagante = memo_raw.replace("BOLETO PAGO POR","").strip()[:40]
-                nm = False           # não pontua por nome
-                score = 50           # base: valor bate
-                score += (20 if dd <= 3 else 15 if dd <= 7 else 8 if dd <= 15 else 3)
-                # Boost se valor exato (diferença < 0.1%)
-                if abs(vo - vh) / max(vh, 0.01) < 0.001:
-                    score += 15
-            elif memo_raw.startswith("PIX RECEBIDO DE") or memo_raw.startswith("TED RECEBIDA DE"):
-                tipo_pag = "PIX/TED"
-                pagante = (memo_raw.replace("PIX RECEBIDO DE","")
-                                   .replace("TED RECEBIDA DE","")
-                                   .split("|")[0].strip()[:40])
-                # Para PIX/TED: pagante normalmente é o próprio cliente
-                pw = _palavras(hub_row["_nome_c"])
-                # Tenta match com pagante também
-                pagante_norm = _norm(pagante)
-                nm = any(p in pagante_norm for p in pw) if pw else False
-                score = 50
-                score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 2)
-                score += 30 if nm else 0
-                if abs(vo - vh) / max(vh, 0.01) < 0.001:
-                    score += 10
+            # Ambiguidade: quantas cobranças têm esse valor?
+            n_same = hub_val_count.get(round(vh, 2), 1)
+            unico  = (n_same == 1)
+            raro   = (n_same <= 2)
+
+            # Palavras em comum entre pagante e cliente
+            cli_pw   = _palavras(hub_row["_nome_c"])
+            nm_score = len(cli_pw & pagante_pw)
+            nm       = nm_score >= 1
+
+            # ── REGRAS DE ACEITE ──
+            # PIX/TED: precisa nome OU valor único no Hubsoft
+            if tipo_pag == "PIX/TED":
+                if nm_score >= 1 and dd <= 15: pass
+                elif unico and dd <= 10: pass
+                elif nm_score >= 2 and dd <= 20: pass
+                else: continue
+            # BOLETO: pagante ≠ cliente → foca valor+data; exige valor único/raro OU data muito próxima
+            elif tipo_pag == "BOLETO":
+                if unico and dd <= 15: pass
+                elif raro and dd <= 7: pass
+                elif dd <= 3 and diff_pct < 0.002: pass
+                else: continue
             else:
-                tipo_pag = "OUTRO"
-                pagante = mo[:40]
-                pw = _palavras(hub_row["_nome_c"])
-                nm = any(p in mo for p in pw) if pw else False
-                score = 50
-                score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 2)
-                score += 20 if nm else 0
+                if (nm or unico) and dd <= 10: pass
+                else: continue
+
+            # ── SCORE ──
+            score = 0
+            score += (40 if diff_pct < 0.001 else 30 if diff_pct < 0.003 else 20)
+            score += (25 if dd <= 2 else 18 if dd <= 4 else 12 if dd <= 7
+                      else 8 if dd <= 12 else 4)
+            if tipo_pag in ("PIX/TED", "OUTRO"):
+                score += min(nm_score * 15, 35)
+            if unico: score += 10
+            if raro:  score += 5
 
             candidatos.append({
                 "io": io, "ih": ih, "score": score, "dd": dd, "nm": nm,
-                "hub_idx":   ih,
-                "nome_hub":  hub_row["_nome_c"],
-                "val_hub":   vh,
-                "venc_hub":  str(hub_row.get(col_venc, ""))[:10] if col_venc else "—",
-                "val_ofx":   vo,
-                "data_ofx":  do.strftime("%d/%m/%Y") if pd.notna(do) else "—",
-                "memo_ofx":  str(ofx_row.get("memo", ""))[:60],
-                "ofx_id":    str(ofx_row.get("ofx_id", io)),
-                "tipo_pag":  tipo_pag,
-                "pagante":   pagante,
+                "hub_idx":  ih,
+                "nome_hub": hub_row["_nome_c"],
+                "val_hub":  vh,
+                "venc_hub": str(hub_row.get(col_venc, ""))[:10] if col_venc else "—",
+                "val_ofx":  vo,
+                "data_ofx": do.strftime("%d/%m/%Y") if pd.notna(do) else "—",
+                "memo_ofx": str(ofx_row.get("memo", ""))[:60],
+                "ofx_id":   str(ofx_row.get("ofx_id", io)),
+                "tipo_pag": tipo_pag,
+                "pagante":  pagante,
+                "n_same":   n_same,
             })
+
 
     if not candidatos:
         return pd.DataFrame()
@@ -646,7 +668,7 @@ def run_conciliacao(ofx_df, hub_df):
 
     result = pd.DataFrame(final).drop(columns=["io"], errors="ignore")
     result["confianca"] = result["score"].apply(
-        lambda s: "🟢 Alta" if s >= 85 else "🟡 Média" if s >= 65 else "🟠 Baixa"
+        lambda s: "🟢 Alta" if s >= 65 else "🟡 Média" if s >= 45 else "⚠️ Revisar"
     )
     result["val_hub_fmt"] = result["val_hub"].apply(brl)
     result["val_ofx_fmt"] = result["val_ofx"].apply(brl)
