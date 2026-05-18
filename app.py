@@ -428,6 +428,10 @@ def parse_recebidos(uploaded) -> pd.DataFrame:
                 dt  = g("DTPOSTED")[:8]
                 mem = g("MEMO").strip()[:80]
                 data_str = f"{dt[6:8]}/{dt[4:6]}/{dt[:4]}" if len(dt)>=8 else ""
+                # Ignora intercompany (RDMI, RRD, etc.)
+                INTERCOMPANY = ["RDMI","RRD TELECOM","GRUPO JET","JET TELECOM"]
+                if any(ic.upper() in mem.upper() for ic in INTERCOMPANY):
+                    continue
                 rows.append({
                     "__pagante": mem,
                     "__val":     abs(val),
@@ -763,6 +767,8 @@ def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
     nao_cobertos   = []
     saldo          = float(caixa_inicial)
     pagos_ids      = set()
+    # Note: rec_por_dia already accounts for the pending receivables
+    # caixa_inicial = current bank balance (user should input actual saldo BTG)
 
     data_atual = data_ini
     while data_atual <= data_fim:
@@ -933,7 +939,8 @@ with st.sidebar:
 
     caixa_ini = st.number_input(
         "💵 Caixa disponível hoje (R$)",
-        min_value=0.0, value=0.0, step=500.0, format="%.2f"
+        min_value=0.0, value=0.0, step=500.0, format="%.2f",
+        help="Informe o saldo bancário atual. Saldo BTG: R$ 3.391,22 (extrato OFX)"
     )
     data_ini_input = st.date_input(
         "📅 Data de início",
@@ -1084,7 +1091,7 @@ rec_faturado= rec_total  # total faturado = todas as cobranças
 # Recebido real: prioridade para o extrato OFX (Já Recebidos)
 if not rec_df_recebidos.empty:
     rec_pago = float(rec_df_recebidos["__val"].sum())
-    fonte_rec = f"{len(rec_df_recebidos)} pgtos do extrato"
+    fonte_rec = f"{len(rec_df_recebidos)} pgtos (sem intercompany)"
 elif not rec_df.empty and "__pago" in rec_df.columns:
     rec_pago = float(rec_df.loc[rec_df["__pago"], "__val"].sum())
     fonte_rec = "Hubsoft baixados"
@@ -1097,7 +1104,9 @@ pct_adimpl    = round(rec_pago / max(rec_total, 1) * 100, 1)
 
 # Linha 1 — visão geral
 k1,k2,k3,k4,k5 = st.columns(5)
-k1.metric("💰 Faturado",   brl(rec_total),    f"{len(rec_df) if not rec_df.empty else 0} cobranças")
+_n_cli = rec_df.iloc[:,0].nunique() if not rec_df.empty else 0
+_n_cobr = len(rec_df) if not rec_df.empty else 0
+k1.metric("💰 Faturado",   brl(rec_total),    f"{_n_cobr} cobranças · {_n_cli} clientes")
 k2.metric("✅ Recebido",   brl(rec_pago),     f"{pct_adimpl}% — {fonte_rec}")
 k3.metric("📊 A Receber",  brl(rec_a_receber),f"{round(100-pct_adimpl,1)}% pendente")
 k4.metric("💸 A Pagar",    brl(pag_df["__apagar"].sum()), f"{len(pag_df)} contas")
