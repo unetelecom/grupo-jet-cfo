@@ -94,24 +94,33 @@ def brl(v: float) -> str:
         return "R$ —"
 
 def pv(v) -> float:
-    """Parse de valor monetário (aceita BR e US)."""
+    """Parse de valor monetário — aceita US, BR e floats do Excel."""
     if v is None: return 0.0
-    if isinstance(v, (int, float)): return abs(float(v))
-    s = str(v).strip().replace("R$","").replace("$","").replace(" ","")
-    if s in ("","-","nan","None","null","—"): return 0.0
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return 0.0 if f != f else abs(f)  # NaN check
+    s = str(v).strip().replace("R$","").replace("$","").replace("\xa0","").replace(" ","")
+    if s in ("","-","nan","None","null","—","n/d","nd"): return 0.0
+    # 1ª tentativa: float direto — cobre "396564.88000000024", inteiros, US
+    try:
+        return abs(float(s))
+    except:
+        pass
+    # 2ª tentativa: formato BR com vírgula decimal
     try:
         hd = "." in s; hc = "," in s
         if hd and hc:
-            s = s.replace(",","") if s.rfind(".")>s.rfind(",") else s.replace(".","").replace(",",".")
+            # Decide separador decimal pelo último separador
+            s2 = s.replace(".","").replace(",",".") if s.rfind(",")>s.rfind(".") else s.replace(",","")
+            return abs(float(s2))
         elif hc and not hd:
             p = s.split(",")
-            s = s.replace(",",".") if len(p)==2 and len(p[1])<=2 else s.replace(",","")
-        elif hd and not hc:
-            p = s.split(".")
-            if not (len(p)==2 and len(p[1])<=2): s = s.replace(".","")
-        return abs(float(s))
+            s2 = s.replace(",",".") if len(p)==2 and len(p[1])<=2 else s.replace(",","")
+            return abs(float(s2))
+        return 0.0
     except:
         return 0.0
+
 
 def parse_date(series: pd.Series) -> pd.Series:
     """
@@ -447,23 +456,43 @@ def parse_recebidos(uploaded) -> pd.DataFrame:
     # ── XLSX / CSV: planilha manual ──
     try:
         if name.endswith(".csv"):
+            df = None
             for enc in ["utf-8","latin-1","cp1252"]:
                 try: df = pd.read_csv(uploaded, dtype=str, encoding=enc); break
                 except: uploaded.seek(0)
+            if df is None: return pd.DataFrame()
         else:
+            # Tenta header=0; se colunas forem "Unnamed", pula a linha de título (header=1)
             df = pd.read_excel(uploaded, dtype=str)
+            unnamed = sum(1 for c in df.columns if "Unnamed" in str(c) or str(c).strip() == "")
+            if unnamed >= len(df.columns) // 2:
+                uploaded.seek(0)
+                df = pd.read_excel(uploaded, header=1, dtype=str)
+            # Remove linhas completamente vazias
+            df = df.dropna(how="all").reset_index(drop=True)
     except Exception as e:
         st.error(f"Erro ao ler arquivo: {e}"); return pd.DataFrame()
 
     if df.empty: return pd.DataFrame()
 
-    col_pag  = dcol(df,"pagante","cliente","nome","razao","pagador","payer","description","memo","descricao")
-    col_val  = dcol(df,"valor","value","amount","recebido","credito","entrada")
-    col_data = dcol(df,"data","date","data_pagamento","datapagamento","dt","when")
+    # Detecta colunas — inclui variações do Hubsoft financeiro
+    col_pag  = dcol(df,"razao_social","razaosocial","pagante","cliente","nome",
+                    "pagador","payer","description","memo","descricao")
+    col_val  = dcol(df,"recebido","valor_recebido","valorrecebido","valor","value",
+                    "amount","credito","entrada","valor_da_conta")
+    col_data = dcol(df,"data_credito","datacredito","data_de_credito",
+                    "data","date","data_pagamento","datapagamento","vencimento")
 
-    if not col_val: return pd.DataFrame()
+    if not col_val:
+        st.warning(f"Coluna de valor não encontrada. Colunas disponíveis: {list(df.columns)}")
+        return pd.DataFrame()
 
-    df["__pagante"] = df[col_pag].fillna("").astype(str).str.strip() if col_pag else "Não identificado"
+    # Razão Social "N/D" → substitui por "Não Identificado"
+    if col_pag:
+        df[col_pag] = df[col_pag].fillna("").astype(str).str.strip()
+        df.loc[df[col_pag].str.upper().isin(["N/D","ND","N.D","N.D.","","NAN"]), col_pag] = "Não identificado"
+
+    df["__pagante"] = df[col_pag].astype(str).str.strip() if col_pag else "Não identificado"
     df["__val"]     = df[col_val].apply(pv)
     df["__data"]    = parse_date(df[col_data]) if col_data else pd.NaT
     df["__memo"]    = df["__pagante"]
