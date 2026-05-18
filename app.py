@@ -470,6 +470,17 @@ def parse_recebidos(uploaded) -> pd.DataFrame:
                 df = pd.read_excel(uploaded, header=1, dtype=str)
             # Remove linhas completamente vazias
             df = df.dropna(how="all").reset_index(drop=True)
+            # Remove linha totalizadora do Hubsoft (última linha sem data/cliente)
+            # O Hubsoft adiciona uma linha de TOTAL no final: só tem valor, resto é NaN
+            col_first = df.columns[0]  # Minha Empresa
+            col_sec   = df.columns[1]  # Data de Crédito
+            mask_total = (
+                df[col_first].isna() | df[col_first].astype(str).str.strip().isin(["","nan"])
+            ) & (
+                df[col_sec].isna()   | df[col_sec].astype(str).str.strip().isin(["","nan"])
+            )
+            if mask_total.any():
+                df = df[~mask_total].reset_index(drop=True)
     except Exception as e:
         st.error(f"Erro ao ler arquivo: {e}"); return pd.DataFrame()
 
