@@ -1120,16 +1120,53 @@ with col_det2:
 
 st.markdown("---")
 
-# Análise dos próximos N dias
-st.markdown(f"#### 📌 Análise dos Próximos {int(dias_hor)} Dias")
-an1,an2,an3 = st.columns(3)
-total_ent_display = rec_pago + a["total_rec_esp"] if not rec_df_recebidos.empty else a["total_rec_esp"]
-an1.metric("💸 Compromissos do período",   brl(a["total_pagar"]),        f"{a['n_pend']} contas")
-an2.metric("📥 Entradas (receb+projetado)",brl(total_ent_display),       f"Receb: {brl(rec_pago)} + Proj: {brl(a['total_rec_esp'])}" if not rec_df_recebidos.empty else "Vencimentos 100%")
-an3.metric("⚖️ GAP (Entradas − Compromissos)",
-           brl(abs(a["gap"])),
-           "DÉFICIT" if a["gap"] < 0 else "SUPERÁVIT",
-           delta_color="inverse" if a["gap"] < 0 else "normal")
+# ── GAP REAL: A Receber − A Pagar ──────────────────────────────────────────
+# A Receber = o que ainda está pendente de entrar (faturado - já recebido)
+# A Pagar   = total de compromissos em aberto
+# GAP       = A Receber - A Pagar  →  negativo = vai faltar dinheiro
+total_a_pagar  = float(pag_df["__apagar"].sum())
+gap_real       = rec_a_receber - total_a_pagar     # rec_a_receber = faturado - rec_pago
+gap_com_caixa  = rec_a_receber + caixa_ini - total_a_pagar  # considera o que já tem no caixa
+
+st.markdown("#### 📌 Posição Financeira Real")
+an1, an2, an3, an4 = st.columns(4)
+an1.metric("✅ Já Recebido",        brl(rec_pago),         fonte_rec)
+an2.metric("🔵 A Receber (pend.)",  brl(rec_a_receber),    f"{round(100-pct_adimpl,1)}% do faturado")
+an3.metric("💸 A Pagar (total)",    brl(total_a_pagar),    f"{len(pag_df)} contas")
+an4.metric(
+    "⚖️ GAP Real (A Receber − A Pagar)",
+    brl(abs(gap_real)),
+    f"{'DÉFICIT — vai faltar 🔴' if gap_real < 0 else 'SUPERÁVIT ✅'}",
+    delta_color="inverse" if gap_real < 0 else "normal"
+)
+
+if gap_real < 0:
+    st.error(
+        f"🚨 **Déficit real de {brl(abs(gap_real))}** — "
+        f"O que ainda será recebido (**{brl(rec_a_receber)}**) "
+        f"não cobre o que precisa ser pago (**{brl(total_a_pagar)}**). "
+        f"{'Com o caixa atual, o déficit é ' + brl(abs(gap_com_caixa)) if gap_com_caixa < 0 else 'Com o caixa atual (' + brl(caixa_ini) + '), déficit reduz para ' + brl(abs(gap_com_caixa))}"
+    )
+else:
+    st.success(
+        f"✅ **Superávit de {brl(gap_real)}** — "
+        f"O que será recebido ({brl(rec_a_receber)}) supera os compromissos ({brl(total_a_pagar)})."
+    )
+
+st.markdown("---")
+
+# Análise da agenda do período
+st.markdown(f"#### 📅 Projeção dos Próximos {int(dias_hor)} Dias")
+an_p1, an_p2, an_p3 = st.columns(3)
+an_p1.metric("💸 Compromissos no período", brl(a["total_pagar"]),     f"{a['n_pend']} contas")
+an_p2.metric("📥 Entradas esperadas",      brl(a["total_rec_esp"]),   "Vencimentos do período")
+gap_periodo = a["total_rec_esp"] + caixa_ini - a["total_pagar"]
+an_p3.metric(
+    "⚖️ GAP do Período",
+    brl(abs(gap_periodo)),
+    "DÉFICIT" if gap_periodo < 0 else "SUPERÁVIT",
+    delta_color="inverse" if gap_periodo < 0 else "normal"
+)
 
 st.markdown("---")
 
@@ -1200,25 +1237,26 @@ nc_crit = [n for n in a["nao_cobertos"] if n["prio"] == 0]
 dias_crit_list = [d for d in a["dias"] if d["status_dia"] in ("🔴 CRÍTICO","🚨 NEGATIVO") and not d["fim_semana"]]
 st.markdown(f"""
 **📋 SITUAÇÃO BASE:**
-- Caixa atual: **{brl(caixa_ini)}**
+- 💵 Caixa atual: **{brl(caixa_ini)}**
 - ✅ Já recebido: **{brl(rec_pago)}** ({fonte_rec})
-- A pagar TOTAL: **{brl(pag_df['__apagar'].sum())}**
-- A receber (pendente): **{brl(rec_a_receber)}**
+- 🔵 A receber (pendente): **{brl(rec_a_receber)}**
+- 💸 A pagar (total): **{brl(total_a_pagar)}**
+- ⚖️ **GAP REAL (A Receber − A Pagar): {brl(abs(gap_real))} {'DÉFICIT 🔴' if gap_real < 0 else 'SUPERÁVIT ✅'}**
 
-**📊 NESTES {int(dias_hor)} DIAS:**
+**📅 PROJEÇÃO DOS PRÓXIMOS {int(dias_hor)} DIAS:**
 - Compromissos do período: **{brl(a['total_pagar'])}** ({a['n_pend']} contas)
-- Entradas esperadas: **{brl(a['total_rec_esp'])}**
-- GAP: **{brl(abs(a['gap']))}** ({'DÉFICIT 🔴' if a['gap']<0 else 'SUPERÁVIT ✅'})
+- Entradas esperadas no período: **{brl(a['total_rec_esp'])}**
+- GAP do período: **{brl(abs(gap_periodo))}** ({'DÉFICIT 🔴' if gap_periodo < 0 else 'SUPERÁVIT ✅'})
 
 **✅ RESULTADO DA AGENDA:**
 - Pagamentos COBERTOS: **{brl(a['total_coberto'])}** ({a['n_cobertos']} contas — {a['pct_coberto']}%)
 - Pagamentos NÃO COBERTOS: **{brl(a['total_nc'])}** ({a['n_nc']} contas — {round(a['n_nc']/max(a['n_pend'],1)*100,1)}%)
-- Saldo final: **{brl(a['saldo_final'])}**
+- Saldo final do período: **{brl(a['saldo_final'])}**
 
 **🚨 AÇÕES OBRIGATÓRIAS:**
-1. RENEGOCIAR prazo de **{a['n_nc']} contas** que não cabem no caixa *(ver aba ⚠️ Não Cobertos)*
-2. COBRANÇA ATIVA dos inadimplentes para cobrir o gap de **{brl(abs(a['gap']))}**
-3. Primeira semana é {'CRÍTICA ⚠️' if a['n_dias_crit']>3 else 'monitorada'} — **{a['n_dias_crit']} dias** com saldo < R$ 500
+1. COBRAR os **{brl(rec_a_receber)}** pendentes para cobrir o déficit de **{brl(abs(gap_real))}**
+2. RENEGOCIAR prazo de **{a['n_nc']} contas** que não cabem no caixa *(ver ⚠️ Não Cobertos)*
+3. Monitorar os **{a['n_dias_crit']} dias críticos** com saldo < R$ 500
 """)
 
 # ══════════════════════════════════════════════════════════════════════
