@@ -1218,7 +1218,10 @@ if _HAS_HUB:
             _hub_auto_ok = True
             _hub_totais  = _hub_data["totais"]
         except Exception as _hub_err:
-            st.sidebar.warning(f"⚠️ Hubsoft: {str(_hub_err)[:80]}")
+            _err_msg = str(_hub_err)
+            # Mostra erro detalhado na aba Hubsoft, aviso curto na sidebar
+            st.session_state["hub_erro"] = _err_msg
+            st.sidebar.error(f"🔗 Hubsoft: erro de conexão — ver aba 🔗")
             _hub_auto_ok = False
 
 data_ini_ts = pd.Timestamp(data_ini_input)
