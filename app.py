@@ -1106,6 +1106,42 @@ with st.sidebar:
         up_receber = None
         st.info("📥 Faturamento via **Hubsoft** (automático)", icon="🔗")
 
+    # ── Seletor de mês do Hubsoft ─────────────────────────────────────
+    if _hub_ativo:
+        st.markdown("---")
+        st.markdown("#### 📅 Período Hubsoft")
+        from datetime import datetime as _dt_s, timezone as _tz_s, timedelta as _td_s
+        _brt_s = _tz_s(_td_s(hours=-3))
+        _mes_atual = _dt_s.now(_brt_s).strftime("%Y-%m")
+        _ano_atual = int(_mes_atual[:4])
+        _mes_num   = int(_mes_atual[5:7])
+
+        _col_m1, _col_m2 = st.columns(2)
+        with _col_m1:
+            _meses_pt = ["Jan","Fev","Mar","Abr","Mai","Jun",
+                         "Jul","Ago","Set","Out","Nov","Dez"]
+            _mes_sel = st.selectbox(
+                "Mês", _meses_pt,
+                index=_mes_num - 1,
+                key="hub_mes_sel"
+            )
+            _mes_num_sel = _meses_pt.index(_mes_sel) + 1
+        with _col_m2:
+            _anos = list(range(_ano_atual - 2, _ano_atual + 2))
+            _ano_sel = st.selectbox(
+                "Ano", _anos,
+                index=_anos.index(_ano_atual),
+                key="hub_ano_sel"
+            )
+
+        _hub_mes_sidebar = f"{_ano_sel}-{_mes_num_sel:02d}"
+        st.caption(f"Consultando: **{_mes_sel}/{_ano_sel}** ({_hub_mes_sidebar})")
+
+        if st.button("🔄 Recarregar Hubsoft", key="btn_reload_hub", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+
     up_recebidos = st.file_uploader(
         "✅ Já Recebidos (xlsx/csv/ofx)",
         type=["xlsx","xls","csv","ofx","txt"],
@@ -1196,8 +1232,21 @@ if _HAS_HUB:
     _hub_cred_ok = all([_hub_url, _hub_cid, _hub_csec, _hub_user, _hub_pass])
 
     if _hub_cred_ok:
-        from datetime import datetime as _dtnow
-        _hub_mes = _dtnow.now().strftime("%Y-%m")
+        from datetime import datetime as _dtnow, timezone, timedelta as _td
+        _brt = timezone(_td(hours=-3))  # Brazil timezone UTC-3
+        # Usa o mês selecionado na sidebar (ou mês atual como padrão)
+        _hub_mes = st.session_state.get("hub_mes_sel_val",
+                   _dtnow.now(_brt).strftime("%Y-%m"))
+        # Salva o mês selecionado no session_state para o auto-load
+        if _hub_ativo:
+            _m = st.session_state.get("hub_mes_sel", _dtnow.now(_brt).strftime("%b")[:3])
+            _a = st.session_state.get("hub_ano_sel", _dtnow.now(_brt).year)
+            _meses_pt2 = ["Jan","Fev","Mar","Abr","Mai","Jun",
+                          "Jul","Ago","Set","Out","Nov","Dez"]
+            try:
+                _mn = _meses_pt2.index(_m) + 1
+                _hub_mes = f"{_a}-{_mn:02d}"
+            except: pass
 
         @st.cache_data(ttl=300, show_spinner=False)
         def _hub_importar(url, cid, csec, user, pwd, mes):
