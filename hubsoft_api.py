@@ -377,30 +377,38 @@ class HubsoftAPI:
         d_ini    = f"{mes}-01"              # sempre do dia 1
         d_fim    = f"{mes}-{ult_dia:02d}"  # até o último dia do mês
 
-        # ── Busca faturas abertas (status_pagamento=aberto) ──────────────
+        # ── ESTRATÉGIA SIMPLES E CONFIÁVEL ───────────────────────────────
+        # 1. Busca TODAS as faturas do mês (sem filtro de status)
+        #    → retorna as pagas por vencimento em maio
+        cob_pagas = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+
+        # 2. Busca as abertas (vencimento em maio, ainda não pagas)
         cob_abertas = self.get_cobrancas(
             d_ini, d_fim, tipo_data="vencimento", status_pag="aberto"
         )
-        # ── Busca faturas pagas no mês (por data de pagamento) ────────
-        cob_pagas = self.get_cobrancas(
-            d_ini, d_fim, tipo_data="pagamento", pago=True
-        )
-        # ── Combina: todas = abertas + pagas ──────────────────────────
+
+        # 3. Combina sem duplicar
         if not cob_abertas.empty and not cob_pagas.empty:
-            cob_mes = pd.concat([cob_abertas, cob_pagas], ignore_index=True)
-            cob_mes = cob_mes.drop_duplicates(subset=["id_cobranca"] if "id_cobranca" in cob_mes.columns else None)
+            id_col = "id_cobranca" if "id_cobranca" in cob_pagas.columns else None
+            ids_pagas = set(cob_pagas[id_col].astype(str)) if id_col else set()
+            # Adiciona abertas que não estão nas pagas
+            if id_col:
+                novas = cob_abertas[~cob_abertas[id_col].astype(str).isin(ids_pagas)]
+            else:
+                novas = cob_abertas
+            cob_mes = pd.concat([cob_pagas, novas], ignore_index=True)
         elif not cob_abertas.empty:
             cob_mes = cob_abertas
-        elif not cob_pagas.empty:
-            cob_mes = cob_pagas
         else:
-            # Fallback: tenta sem filtro de status
-            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+            cob_mes = cob_pagas
 
-        # Recebimentos por data de pagamento (para o rec_recebidos)
-        cob_rec = cob_pagas if not cob_pagas.empty else pd.DataFrame()
+        # 4. rec_recebidos = faturas classificadas como PAGO
+        if not cob_mes.empty and "status" in cob_mes.columns:
+            cob_rec = cob_mes[cob_mes["status"] == "PAGO"].copy()
+        else:
+            cob_rec = pd.DataFrame()
 
-        print(f"  Abertas: {len(cob_abertas)} | Pagas: {len(cob_pagas)} | Total: {len(cob_mes)}")
+        print(f"  Pagas(venc): {len(cob_pagas)} | Abertas: {len(cob_abertas)} | Total: {len(cob_mes)}")
         try:    clientes = self.get_clientes("ativo")
         except: clientes = pd.DataFrame()
 
