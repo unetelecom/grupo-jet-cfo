@@ -578,13 +578,42 @@ def run_conciliacao(ofx_df, hub_df):
                 dd = 999
             if dd > 20: continue
 
-            # Match de nome
-            pw = _palavras(hub_row["_nome_c"])
-            nm = any(p in mo for p in pw) if pw else False
-
-            score = 50  # base: valor igual
-            score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 0)
-            score += 35 if nm else 0
+            # ── Tipo de pagamento: regra de nome diferente para boleto ──
+            memo_raw = str(ofx_row.get("memo", "")).upper()
+            if memo_raw.startswith("BOLETO PAGO POR"):
+                tipo_pag = "BOLETO"
+                # Para boleto: pagante ≠ cliente → nome NÃO é critério confiável
+                # Extrai o nome do pagante do memo para exibição
+                pagante = memo_raw.replace("BOLETO PAGO POR","").strip()[:40]
+                nm = False           # não pontua por nome
+                score = 50           # base: valor bate
+                score += (20 if dd <= 3 else 15 if dd <= 7 else 8 if dd <= 15 else 3)
+                # Boost se valor exato (diferença < 0.1%)
+                if abs(vo - vh) / max(vh, 0.01) < 0.001:
+                    score += 15
+            elif memo_raw.startswith("PIX RECEBIDO DE") or memo_raw.startswith("TED RECEBIDA DE"):
+                tipo_pag = "PIX/TED"
+                pagante = (memo_raw.replace("PIX RECEBIDO DE","")
+                                   .replace("TED RECEBIDA DE","")
+                                   .split("|")[0].strip()[:40])
+                # Para PIX/TED: pagante normalmente é o próprio cliente
+                pw = _palavras(hub_row["_nome_c"])
+                # Tenta match com pagante também
+                pagante_norm = _norm(pagante)
+                nm = any(p in pagante_norm for p in pw) if pw else False
+                score = 50
+                score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 2)
+                score += 30 if nm else 0
+                if abs(vo - vh) / max(vh, 0.01) < 0.001:
+                    score += 10
+            else:
+                tipo_pag = "OUTRO"
+                pagante = mo[:40]
+                pw = _palavras(hub_row["_nome_c"])
+                nm = any(p in mo for p in pw) if pw else False
+                score = 50
+                score += (15 if dd <= 3 else 10 if dd <= 7 else 5 if dd <= 15 else 2)
+                score += 20 if nm else 0
 
             candidatos.append({
                 "io": io, "ih": ih, "score": score, "dd": dd, "nm": nm,
@@ -596,6 +625,8 @@ def run_conciliacao(ofx_df, hub_df):
                 "data_ofx":  do.strftime("%d/%m/%Y") if pd.notna(do) else "—",
                 "memo_ofx":  str(ofx_row.get("memo", ""))[:60],
                 "ofx_id":    str(ofx_row.get("ofx_id", io)),
+                "tipo_pag":  tipo_pag,
+                "pagante":   pagante,
             })
 
     if not candidatos:
@@ -619,6 +650,9 @@ def run_conciliacao(ofx_df, hub_df):
     )
     result["val_hub_fmt"] = result["val_hub"].apply(brl)
     result["val_ofx_fmt"] = result["val_ofx"].apply(brl)
+    # Garante colunas de tipo e pagante
+    if "tipo_pag" not in result.columns: result["tipo_pag"] = "OUTRO"
+    if "pagante"  not in result.columns: result["pagante"]  = ""
     return result.sort_values("score", ascending=False).reset_index(drop=True)
 
 
@@ -1394,12 +1428,24 @@ elif "Clientes" in page:
                             dd=abs(int(diff2.total_seconds()/86400))
                     except: dd=999
                     if dd>25: continue
-                    pw=_pw(hr["__n"]); nm=any(p in mo for p in pw) if pw else False
-                    score=50+(15 if dd<=3 else 10 if dd<=7 else 5 if dd<=15 else 2)+(35 if nm else 0)
+                    memo_u=or_.get("memo","").upper()
+                    if memo_u.startswith("BOLETO PAGO POR"):
+                        tp="BOLETO"; pag=memo_u.replace("BOLETO PAGO POR","").strip()[:35]
+                        nm=False; score=50+(20 if dd<=3 else 15 if dd<=7 else 8 if dd<=15 else 3)
+                        if abs(vo-vh)/max(vh,0.01)<0.001: score+=15
+                    elif memo_u.startswith("PIX RECEBIDO DE") or memo_u.startswith("TED RECEBIDA DE"):
+                        tp="PIX/TED"; pag=memo_u.replace("PIX RECEBIDO DE","").replace("TED RECEBIDA DE","").split("|")[0].strip()[:35]
+                        pw=_pw(hr["__n"]); pag_n=_normb(pag)
+                        nm=any(p in pag_n for p in pw) if pw else False
+                        score=50+(15 if dd<=3 else 10 if dd<=7 else 5 if dd<=15 else 2)+(30 if nm else 0)
+                    else:
+                        tp="OUTRO"; pag=or_.get("memo","")[:35]; pw=_pw(hr["__n"]); nm=any(p in mo for p in pw) if pw else False
+                        score=50+(15 if dd<=3 else 10 if dd<=7 else 5 if dd<=15 else 2)+(20 if nm else 0)
                     cands_c.append({"io":io,"ih":ih,"score":score,"dd":dd,"nm":nm,
                         "nome":hr["__n"],"val_hub":vh,"val_ofx":vo,
                         "data_ofx":do.strftime("%d/%m/%Y"),"memo":or_.get("memo","")[:60],
-                        "venc":str(hr["__vc"])[:10] if pd.notna(hr["__vc"]) else "—"})
+                        "venc":str(hr["__vc"])[:10] if pd.notna(hr["__vc"]) else "—",
+                        "tipo_pag":tp,"pagante":pag})
 
             used_o2=set(); used_h2=set(); m2=[]
             if cands_c:
@@ -1431,9 +1477,13 @@ elif "Clientes" in page:
             with sub1:
                 if not mdf2.empty:
                     conf_label = mdf2["score"].apply(lambda s: "🟢" if s>=85 else "🟡" if s>=65 else "🟠")
-                    d1=pd.DataFrame({"Conf.":conf_label,"Cliente":mdf2["nome"],
+                    tipo_col = mdf2.get("tipo_pag", pd.Series(["—"]*len(mdf2)))
+                    pag_col  = mdf2.get("pagante",  pd.Series(["—"]*len(mdf2)))
+                    d1=pd.DataFrame({"Conf.":conf_label,"Tipo":tipo_col,
+                        "Cliente (Hubsoft)":mdf2["nome"],"Pagante (Banco)":pag_col,
                         "Valor Hub":mdf2["val_hub"].apply(brl),"Valor Banco":mdf2["val_ofx"].apply(brl),
-                        "Data Pgt":mdf2["data_ofx"],"Vencimento":mdf2["venc"],"Memo":mdf2["memo"]})
+                        "Data Pgt":mdf2["data_ofx"],"Vencimento":mdf2["venc"]})
+                    if d1["Tipo"].eq("—").all(): d1=d1.drop(columns=["Tipo","Pagante (Banco)"])
                     st.dataframe(d1,use_container_width=True,height=340,hide_index=True)
                     ca,cb = st.columns(2)
                     with ca:
@@ -2228,9 +2278,24 @@ elif "Conciliação" in page:
         # ── Tabela de matches com seleção ──
         st.markdown(f"**{len(result_show)} matches — selecione os que deseja baixar:**")
 
-        # Colunas para exibição
-        disp = result_show[["confianca","nome_hub","val_hub_fmt","venc_hub","val_ofx_fmt","data_ofx","memo_ofx","dd"]].copy()
-        disp.columns = ["Confiança","Cliente","Valor Cobrado","Vencimento","Valor Pago","Data Pgto","Memo Extrato","Dias Dif."]
+        # Aviso sobre boletos
+        n_bol = (result_show.get("tipo_pag","") == "BOLETO").sum() if "tipo_pag" in result_show.columns else 0
+        if n_bol > 0:
+            st.info(f"ℹ️ **{n_bol} boletos** identificados. Para boleto, o **Pagante** pode ser diferente do cliente — "
+                    f"isso é normal. O match é feito por valor + data, não pelo nome do pagante.")
+
+        # Colunas para exibição — inclui tipo e pagante
+        cols_base = ["confianca","tipo_pag","nome_hub","val_hub_fmt","venc_hub","val_ofx_fmt","data_ofx","dd"]
+        if "pagante" in result_show.columns:
+            cols_base.insert(3,"pagante")
+        cols_avail = [c for c in cols_base if c in result_show.columns]
+        disp = result_show[cols_avail].copy()
+        col_names = {
+            "confianca":"Conf.","tipo_pag":"Tipo Pgto","nome_hub":"Cliente (Hubsoft)",
+            "pagante":"Pagante (Extrato)","val_hub_fmt":"Valor Cobrado",
+            "venc_hub":"Vencimento","val_ofx_fmt":"Valor Pago","data_ofx":"Data Pgto","dd":"Dias Dif."
+        }
+        disp.columns = [col_names.get(c,c) for c in cols_avail]
 
         st.dataframe(disp, use_container_width=True, height=360, hide_index=True)
 
