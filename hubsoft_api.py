@@ -84,6 +84,10 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
 
 class HubsoftAPI:
 
+    # Endpoints em ordem de preferência:
+    # 1. /financeiro/fatura    → só faturas com boleto (retornou 190 para maio)
+    # 2. /cliente/financeiro   → cobranças + faturas por cliente (mais completo)
+    # 3. /financeiro/cobranca  → cobranças avulsas (pode retornar 1857)
     COBRANCA_ENDPOINTS = [
         "/api/v1/integracao/financeiro/fatura",
         "/api/v1/integracao/financeiro/cobranca",
@@ -204,30 +208,59 @@ class HubsoftAPI:
     # ── COBRANÇAS ─────────────────────────────────────────────────────
     def get_cobrancas(self, data_ini, data_fim,
                       tipo_data="vencimento", pago=None, status_pag=None):
-        params = {
+        # Monta params — tenta variações de nome de campo de data
+        params_vencimento = {
+            "data_vencimento_ini": data_ini,
+            "data_vencimento_fim": data_fim,
+        }
+        params_lancamento = {
+            "data_lancamento_ini": data_ini,
+            "data_lancamento_fim": data_fim,
+        }
+        params_criacao = {
+            "data_criacao_ini": data_ini,
+            "data_criacao_fim": data_fim,
+        }
+        params_custom = {
             f"data_{tipo_data}_ini": data_ini,
             f"data_{tipo_data}_fim": data_fim,
         }
         if pago is not None:
-            params["pago"] = int(pago)
+            for p in [params_vencimento, params_lancamento, params_criacao, params_custom]:
+                p["pago"] = int(pago)
         if status_pag:
-            params["status_pagamento"] = status_pag
+            for p in [params_vencimento, params_lancamento, params_criacao, params_custom]:
+                p["status_pagamento"] = status_pag
 
-        last_err = None
+        # Lista de (endpoint, params) para tentar
+        tentativas = []
         for ep in self.COBRANCA_ENDPOINTS:
+            tentativas.append((ep, params_vencimento))
+            if tipo_data != "vencimento":
+                tentativas.append((ep, params_custom))
+            tentativas.append((ep, params_lancamento))
+
+        melhor = None
+        for ep, params in tentativas:
             try:
                 dados = self._paginar(ep, params)
                 if dados:
-                    print(f"  Endpoint: {ep} -> {len(dados)} registros")
-                    return self._norm_cobrancas(pd.json_normalize(dados))
+                    df = self._norm_cobrancas(pd.json_normalize(dados))
+                    print(f"  {ep} [{list(params.keys())[0]}] -> {len(df)} registros")
+                    # Escolhe o que retornar mais registros
+                    if melhor is None or len(df) > len(melhor):
+                        melhor = df
+                        # Se já tem um bom resultado com /fatura, tenta /cobranca tbm
+                        if "fatura" in ep and len(df) < 500:
+                            continue  # continua para ver se cobranca tem mais
+                        else:
+                            break
             except Exception as e:
-                last_err = e
                 if "404" in str(e) or "Not Found" in str(e):
                     continue
-                raise
-        if last_err:
-            raise last_err
-        return pd.DataFrame()
+                print(f"  Erro {ep}: {str(e)[:60]}")
+
+        return melhor if melhor is not None else pd.DataFrame()
 
     # ── Normaliza cobranças ───────────────────────────────────────────
     @staticmethod
