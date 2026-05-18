@@ -830,6 +830,7 @@ def gerar_agenda(pag_df: pd.DataFrame, rec_df: pd.DataFrame,
     total_coberto  = sum(d["pagamentos"] for d in resultado_dias)
     total_nc       = sum(n["val"] for n in nao_cobertos)
     total_rec_esp  = sum(rec_por_dia.values())
+    # GAP usa entradas confirmadas (extrato) + projetadas do faturamento
     gap            = total_rec_esp + caixa_inicial - total_pagar
     saldo_final    = resultado_dias[-1]["saldo_fim"] if resultado_dias else caixa_inicial
     n_dias_crit    = sum(1 for d in resultado_dias
@@ -1050,16 +1051,31 @@ st.markdown(f"""
 # ══════════════════════════════════════════════════════════════════════
 a = agenda  # atalho
 
+# ── Fonte de verdade: Recebido = extrato OFX > Hubsoft baixados ──
+hoje_ts     = pd.Timestamp.now().normalize()
+rec_total   = float(rec_df["__val"].sum()) if not rec_df.empty else 0.0
+rec_faturado= rec_total  # total faturado = todas as cobranças
+
+# Recebido real: prioridade para o extrato OFX (Já Recebidos)
+if not rec_df_recebidos.empty:
+    rec_pago = float(rec_df_recebidos["__val"].sum())
+    fonte_rec = f"{len(rec_df_recebidos)} pgtos do extrato"
+elif not rec_df.empty and "__pago" in rec_df.columns:
+    rec_pago = float(rec_df.loc[rec_df["__pago"], "__val"].sum())
+    fonte_rec = "Hubsoft baixados"
+else:
+    rec_pago  = 0.0
+    fonte_rec = "não importado"
+
+rec_a_receber = max(rec_total - rec_pago, 0.0)
+pct_adimpl    = round(rec_pago / max(rec_total, 1) * 100, 1)
+
 # Linha 1 — visão geral
 k1,k2,k3,k4,k5 = st.columns(5)
-rec_total  = rec_df["__val"].sum() if not rec_df.empty else 0
-rec_pago   = rec_df.loc[rec_df["__pago"], "__val"].sum() if not rec_df.empty else 0 if "__pago" in rec_df.columns else 0
-rec_arec   = rec_total - rec_pago
-
-k1.metric("💰 Faturado",   brl(rec_total))
-k2.metric("✅ Recebido",   brl(rec_pago))
-k3.metric("📊 A Receber",  brl(a["total_rec_esp"]))
-k4.metric("💸 A Pagar",    brl(pag_df["__apagar"].sum()))
+k1.metric("💰 Faturado",   brl(rec_total),    f"{len(rec_df) if not rec_df.empty else 0} cobranças")
+k2.metric("✅ Recebido",   brl(rec_pago),     f"{pct_adimpl}% — {fonte_rec}")
+k3.metric("📊 A Receber",  brl(rec_a_receber),f"{round(100-pct_adimpl,1)}% pendente")
+k4.metric("💸 A Pagar",    brl(pag_df["__apagar"].sum()), f"{len(pag_df)} contas")
 k5.metric("💵 Caixa Hoje", brl(caixa_ini))
 
 st.markdown("---")
@@ -1068,7 +1084,6 @@ st.markdown("---")
 col_det1, col_det2 = st.columns(2)
 with col_det1:
     st.markdown(f"**💸 Detalhamento A Pagar — {brl(pag_df['__apagar'].sum())}**")
-    hoje_ts = pd.Timestamp.now().normalize()
     atras_pag = pag_df[pag_df["__status_venc"]=="ATRASADO"]["__apagar"].sum()
     avent_pag = pag_df[pag_df["__status_venc"]=="A VENCER"]["__apagar"].sum()
     da1,da2 = st.columns(2)
@@ -1076,12 +1091,24 @@ with col_det1:
     da2.metric("⏳ A Vencer (período)", brl(avent_pag))
 
 with col_det2:
-    st.markdown(f"**📥 Detalhamento A Receber — {brl(a['total_rec_esp'])}**")
-    if not rec_df.empty:
+    st.markdown(f"**📥 Detalhamento A Receber — {brl(rec_faturado)}**")
+    if not rec_df_recebidos.empty:
+        # Com extrato: mostra recebido confirmado vs pendente
+        db1,db2,db3 = st.columns(3)
+        db1.metric("✅ Recebido (extrato)",  brl(rec_pago),       fonte_rec)
+        db2.metric("🔵 A Receber",           brl(rec_a_receber))
+        # Inadimplentes = vencidos não recebidos
+        if not rec_df.empty and "__venc" in rec_df.columns:
+            vencidos_hub = rec_df[
+                rec_df["__venc"].apply(lambda d: pd.notna(d) and d < hoje_ts)
+            ]["__val"].sum()
+            inadimp = max(vencidos_hub - rec_pago, 0)
+            db3.metric("🚨 Inadimplentes est.", brl(inadimp))
+    elif not rec_df.empty:
         rec_inad = rec_df[
             rec_df["__venc"].apply(lambda d: pd.notna(d) and d < hoje_ts)
         ]["__val"].sum() if "__venc" in rec_df.columns else 0
-        rec_normal = a["total_rec_esp"] - rec_inad
+        rec_normal = max(rec_a_receber - rec_inad, 0)
         db1,db2 = st.columns(2)
         db1.metric("🚨 Inadimplentes", brl(rec_inad))
         db2.metric("⏳ A Vencer",      brl(rec_normal))
@@ -1093,8 +1120,9 @@ st.markdown("---")
 # Análise dos próximos N dias
 st.markdown(f"#### 📌 Análise dos Próximos {int(dias_hor)} Dias")
 an1,an2,an3 = st.columns(3)
-an1.metric("💸 Compromissos do período",   brl(a["total_pagar"]),    f"{a['n_pend']} contas")
-an2.metric("📥 Entradas esperadas",        brl(a["total_rec_esp"]),  "Vencimentos 100%")
+total_ent_display = rec_pago + a["total_rec_esp"] if not rec_df_recebidos.empty else a["total_rec_esp"]
+an1.metric("💸 Compromissos do período",   brl(a["total_pagar"]),        f"{a['n_pend']} contas")
+an2.metric("📥 Entradas (receb+projetado)",brl(total_ent_display),       f"Receb: {brl(rec_pago)} + Proj: {brl(a['total_rec_esp'])}" if not rec_df_recebidos.empty else "Vencimentos 100%")
 an3.metric("⚖️ GAP (Entradas − Compromissos)",
            brl(abs(a["gap"])),
            "DÉFICIT" if a["gap"] < 0 else "SUPERÁVIT",
@@ -1170,8 +1198,9 @@ dias_crit_list = [d for d in a["dias"] if d["status_dia"] in ("🔴 CRÍTICO","�
 st.markdown(f"""
 **📋 SITUAÇÃO BASE:**
 - Caixa atual: **{brl(caixa_ini)}**
+- ✅ Já recebido: **{brl(rec_pago)}** ({fonte_rec})
 - A pagar TOTAL: **{brl(pag_df['__apagar'].sum())}**
-- A receber TOTAL: **{brl(a['total_rec_esp'])}**
+- A receber (pendente): **{brl(rec_a_receber)}**
 
 **📊 NESTES {int(dias_hor)} DIAS:**
 - Compromissos do período: **{brl(a['total_pagar'])}** ({a['n_pend']} contas)
@@ -1450,13 +1479,14 @@ with tab_recebidos:
         n_rec     = len(rdf)
 
         # ── KPIs ──
+        fat_hub = rec_df["__val"].sum() if not rec_df.empty else 0
+        pct_rec = round(total_rec / max(fat_hub, 1) * 100, 1)
+        a_rec_val = max(fat_hub - total_rec, 0)
         kr1, kr2, kr3, kr4 = st.columns(4)
-        kr1.metric("✅ Total recebido",   brl(total_rec), f"{n_rec} pagamentos")
-        kr2.metric("📋 Faturado (hub)",   brl(rec_df["__val"].sum() if not rec_df.empty else 0))
-        pct_rec = round(total_rec / max(rec_df["__val"].sum() if not rec_df.empty else 1, 1) * 100, 1)
-        kr3.metric("📊 Adimplência",      f"{pct_rec}%", "do faturado")
-        a_receber = max((rec_df["__val"].sum() if not rec_df.empty else 0) - total_rec, 0)
-        kr4.metric("🔵 Ainda a receber",  brl(a_receber))
+        kr1.metric("✅ Total recebido",   brl(total_rec),  f"{n_rec} pagamentos")
+        kr2.metric("📋 Faturado (hub)",   brl(fat_hub),    f"{len(rec_df) if not rec_df.empty else 0} cobranças")
+        kr3.metric("📊 Adimplência",      f"{pct_rec}%",   "do faturado")
+        kr4.metric("🔵 Ainda a receber",  brl(a_rec_val))
 
         st.markdown("---")
 
