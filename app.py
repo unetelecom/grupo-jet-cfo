@@ -1,9 +1,80 @@
+import re
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import anthropic
 import json
 from datetime import datetime, date, timedelta
+
+import re
+
+# ══════════════════════════════════════════════════════════
+# PARSER OFX COMPLETO — lê TODAS as transações
+# ══════════════════════════════════════════════════════════
+def parse_ofx(raw: str) -> dict:
+    """Parse completo de OFX/SGML (BTG, BB, Safra, CEF, C6). Lê 100% das transações."""
+    ofx_start = raw.find("<OFX>")
+    body = raw[ofx_start:] if ofx_start >= 0 else raw
+
+    def tag(t, src=body):
+        m = re.search(rf'<{t}>\s*(.*?)(?:\n|<)', src, re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    bank_id   = tag("BANKID")
+    acct_id   = tag("ACCTID")
+    dt_start  = tag("DTSTART")[:8]
+    dt_end    = tag("DTEND")[:8]
+    saldo_str = tag("BALAMT")
+
+    def fmt8(d):
+        return f"{d[6:8]}/{d[4:6]}/{d[:4]}" if len(d)>=8 else d
+
+    trns = re.findall(r'<STMTTRN>(.*?)</STMTTRN>', body, re.DOTALL|re.IGNORECASE)
+    rows = []; ent = 0.0; sai = 0.0
+
+    for trn in trns:
+        def g(t, b=trn):
+            m = re.search(rf'<{t}>\s*(.*?)(?:\n|<|$)', b, re.IGNORECASE)
+            return m.group(1).strip() if m else ""
+        try:    val = float(g("TRNAMT").replace(",","."))
+        except: continue
+        dt   = g("DTPOSTED")[:8]
+        memo = g("MEMO").strip()[:80]
+        tipo = "entrada" if val > 0 else "saida"
+        if val > 0: ent += val
+        else:       sai += abs(val)
+        rows.append({"data":fmt8(dt),"tipo":tipo,"valor":val,"abs_valor":abs(val),"memo":memo})
+
+    try:    saldo_real = float(saldo_str)
+    except: saldo_real = ent - sai
+
+    # Categorias
+    cats = {}
+    for r in rows:
+        m = r["memo"].upper()
+        cat = ("PIX"          if "PIX" in m else
+               "BOLETO"       if "BOLETO" in m else
+               "TED"          if "TED" in m else
+               "MENSALIDADE"  if any(x in m for x in ["MENSALIDADE","PLANO","EXCEDENTE"]) else
+               "FOLHA"        if any(x in m for x in ["FOLHA","SALARIO","PAGAMENTO FUNC"]) else "OUTROS")
+        if cat not in cats: cats[cat] = {"ent":0.0,"sai":0.0,"n":0}
+        if r["valor"] > 0: cats[cat]["ent"] += r["valor"]
+        else:              cats[cat]["sai"] += abs(r["valor"])
+        cats[cat]["n"] += 1
+
+    top_e = sorted([r for r in rows if r["valor"]>0], key=lambda x:-x["valor"])[:8]
+    top_s = sorted([r for r in rows if r["valor"]<0], key=lambda x: x["valor"])[:8]
+
+    return {
+        "df":      pd.DataFrame(rows) if rows else pd.DataFrame(),
+        "entradas":ent, "saidas":sai, "saldo":saldo_real,
+        "n_trans": len(rows),
+        "banco":   f"Banco {bank_id}" if bank_id else "BTG Pactual",
+        "conta":   acct_id,
+        "periodo": f"{fmt8(dt_start)} a {fmt8(dt_end)}",
+        "top_ent": top_e, "top_sai": top_s, "cats": cats,
+    }
+
 
 # ══════════════════════════════════════════════════════════
 # CONFIG
@@ -603,47 +674,98 @@ elif "Extratos" in page:
             for f in ups: st.markdown(f"✅ **{f.name}** · {f.size//1024}KB")
 
             if st.button("🤖 Analisar com CFO IA", type="primary", use_container_width=True):
-                with st.spinner("Lendo extrato..."):
-                    txt = ""
+                with st.spinner("Lendo extrato completo..."):
+                    ofx_data  = None   # resultado do parser OFX
+                    txt_extra = ""     # para CSV/XLSX
+
                     for f in ups:
+                        name = f.name.lower()
                         try:
-                            if f.name.lower().endswith((".csv",".txt",".ofx")):
+                            if name.endswith(".ofx"):
+                                # ── PARSER OFX COMPLETO (lê 100% das transações) ──
+                                f.seek(0)
+                                for enc in ["latin-1","cp1252","utf-8"]:
+                                    try:
+                                        raw_ofx = f.read().decode(enc)
+                                        ofx_data = parse_ofx(raw_ofx)
+                                        break
+                                    except: pass
+
+                            elif name.endswith(".csv"):
                                 f.seek(0)
                                 for enc in ["utf-8","latin-1","cp1252"]:
                                     try:
-                                        txt += f"\n--- {f.name} ---\n" + f.read().decode(enc)[:2500]
+                                        txt_extra += f"\n---{f.name}---\n" + f.read().decode(enc)[:4000]
                                         break
                                     except: pass
-                            elif f.name.lower().endswith((".xlsx",".xls")):
+
+                            elif name.endswith((".xlsx",".xls")):
                                 f.seek(0)
                                 df_e = pd.read_excel(f)
-                                txt += f"\n--- {f.name} ---\n" + df_e.head(50).to_string()
-                        except: pass
+                                txt_extra += f"\n---{f.name}---\n" + df_e.head(80).to_string()
 
-                    # Sanitiza contexto (remove aspas e quebras que quebram JSON)
-                    ctx_safe = ctx_financeiro().replace('"',"'").replace("\n"," | ")
-                    txt_safe = (txt[:2000] if txt else "Arquivo PDF.").replace('"',"'")
+                        except Exception as ex:
+                            txt_extra += f"\nErro ao ler {f.name}: {ex}"
 
-                    schema = (
-                        '{"resumo":{"entradas":"R$ X","saidas":"R$ X","saldo":"R$ X","transacoes":0},'
-                        '"parecer":"analise em uma frase",'
-                        '"insights":["insight 1","insight 2"],'
-                        '"alertas":[{"tipo":"warn","texto":"alerta curto"}],'
-                        '"recomendacoes":["acao 1","acao 2"],'
-                        '"transacoes_destaque":[{"desc":"descricao","valor":"R$ X","tipo":"entrada","data":"DD/MM"}]}'
-                    )
-                    prompt = (
-                        f"CONTEXTO: {ctx_safe}\n\n"
-                        f"EXTRATO: {banco} | {dti} a {dtf} | {emp} | {tipo}\n"
-                        f"DADOS DO ARQUIVO:\n{txt_safe}\n\n"
-                        f"Responda SOMENTE o JSON abaixo preenchido, sem nenhum texto antes ou depois:\n{schema}"
-                    )
+                    # ── Monta contexto para o CFO IA ──
+                    ctx_safe = ctx_financeiro().replace('"',"\'").replace("\n"," | ")
+
+                    if ofx_data:
+                        o = ofx_data
+                        brl_f = lambda v: f"R$ {v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                        top_e_txt = " | ".join(f"{r['memo'][:40]} ({brl_f(r['valor'])})" for r in o["top_ent"][:5])
+                        top_s_txt = " | ".join(f"{r['memo'][:40]} ({brl_f(r['valor'])})" for r in o["top_sai"][:5])
+                        cats_txt  = " | ".join(f"{cat}: ent={brl_f(v['ent'])} sai={brl_f(v['sai'])} n={v['n']}"
+                                               for cat,v in o["cats"].items())
+                        prompt = (
+                            f"CONTEXTO EMPRESA: {ctx_safe}\n\n"
+                            f"EXTRATO OFX COMPLETO — Banco: {o['banco']} | Conta: {o['conta']} | Periodo: {o['periodo']}\n"
+                            f"Total transacoes: {o['n_trans']}\n"
+                            f"Entradas totais: {brl_f(o['entradas'])}\n"
+                            f"Saidas totais:   {brl_f(o['saidas'])}\n"
+                            f"Saldo atual:     {brl_f(o['saldo'])}\n"
+                            f"Por categoria: {cats_txt}\n"
+                            f"Top 5 maiores entradas: {top_e_txt}\n"
+                            f"Top 5 maiores saidas:   {top_s_txt}\n\n"
+                            f"Analise solicitada: {tipo}\n\n"
+                            "Responda SOMENTE JSON valido e COMPLETO sem texto extra:\n"
+                            '{"resumo":{"entradas":"R$ X","saidas":"R$ X","saldo":"R$ X","transacoes":0},'
+                            '"parecer":"analise estrategica em 2 frases",'
+                            '"insights":["insight 1","insight 2","insight 3"],'
+                            '"alertas":[{"tipo":"warn","texto":"alerta"}],'
+                            '"recomendacoes":["acao 1","acao 2","acao 3"],'
+                            '"transacoes_destaque":[{"desc":"memo","valor":"R$ X","tipo":"entrada","data":"DD/MM"}]}'
+                        )
+                        # Monta transacoes_destaque direto dos dados reais (sem depender da IA)
+                        trans_dest = (
+                            [{"desc":r["memo"],"valor":brl_f(r["valor"]),"tipo":"entrada","data":r["data"]} for r in o["top_ent"][:4]] +
+                            [{"desc":r["memo"],"valor":brl_f(abs(r["valor"])),"tipo":"saida","data":r["data"]} for r in o["top_sai"][:4]]
+                        )
+                        resumo_real = {
+                            "entradas":   brl_f(o["entradas"]),
+                            "saidas":     brl_f(o["saidas"]),
+                            "saldo":      brl_f(o["saldo"]),
+                            "transacoes": o["n_trans"],
+                        }
+                    else:
+                        txt_safe = txt_extra[:3000].replace('"',"\'")
+                        prompt = (
+                            f"CONTEXTO: {ctx_safe}\n\n"
+                            f"EXTRATO: {banco} | {dti} a {dtf} | {emp} | {tipo}\n"
+                            f"DADOS:\n{txt_safe}\n\n"
+                            "Responda SOMENTE JSON:\n"
+                            '{"resumo":{"entradas":"R$ X","saidas":"R$ X","saldo":"R$ X","transacoes":0},'
+                            '"parecer":"analise em 2 frases","insights":["i1"],"alertas":[{"tipo":"warn","texto":"a"}],'
+                            '"recomendacoes":["r1"],"transacoes_destaque":[{"desc":"d","valor":"R$ X","tipo":"entrada","data":"DD/MM"}]}'
+                        )
+                        resumo_real = None
+                        trans_dest  = None
+
                     sys_e = (
-                        "Voce e Maxwell CFO IA do Grupo Jet. "
-                        "Analise o extrato e responda APENAS um JSON valido e COMPLETO. "
-                        "NUNCA deixe strings abertas ou JSON incompleto. "
-                        "Todas as strings devem ter abertura e fechamento de aspas duplas. "
-                        "Se nao conseguir ler o extrato, estime os valores com base no contexto."
+                        "Voce e Maxwell CFO IA do Grupo Jet/Jet Telecom. "
+                        "Os dados do extrato ja foram pre-calculados e estao no prompt. "
+                        "Use os numeros exatos fornecidos. "
+                        "Responda APENAS JSON valido e COMPLETO. Nunca truncar."
                     )
                     raw = ""
                     try:
@@ -654,28 +776,48 @@ elif "Extratos" in page:
                             messages=[{"role":"user","content":prompt}]
                         )
                         raw = r.content[0].text.strip()
-                        # Limpeza robusta
                         raw = raw.replace("```json","").replace("```","").strip()
-                        start = raw.find("{")
-                        end   = raw.rfind("}") + 1
-                        if start >= 0 and end > start:
-                            raw = raw[start:end]
+                        s_idx = raw.find("{"); e_idx = raw.rfind("}") + 1
+                        if s_idx >= 0 and e_idx > s_idx:
+                            raw = raw[s_idx:e_idx]
                         j = json.loads(raw)
+                        # Se temos dados reais do OFX, substitui os valores calculados
+                        if resumo_real:
+                            j["resumo"] = resumo_real
+                        if trans_dest:
+                            j["transacoes_destaque"] = trans_dest
                         st.session_state.ext_result = j
                         st.rerun()
-                    except json.JSONDecodeError as je:
-                        # Fallback com texto bruto
-                        st.session_state.ext_result = {
-                            "resumo": {"entradas":"—","saidas":"—","saldo":"—","transacoes":0},
-                            "parecer": "Analise parcial — veja os insights abaixo.",
-                            "insights": [raw[:400] if raw else "Sem resposta da API."],
-                            "alertas": [{"tipo":"warn","texto":f"JSON incompleto ({str(je)[:80]}). Tente CSV."}],
-                            "recomendacoes": ["Exporte o extrato como CSV pelo internet banking para melhor leitura."],
-                            "transacoes_destaque": []
-                        }
+                    except json.JSONDecodeError:
+                        # Fallback: monta resultado direto dos dados OFX sem depender de JSON da IA
+                        if ofx_data:
+                            o = ofx_data
+                            brl_f = lambda v: f"R$ {v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                            st.session_state.ext_result = {
+                                "resumo": resumo_real,
+                                "parecer": f"Extrato {o['banco']} ({o['periodo']}): {o['n_trans']} transacoes. Entradas {brl_f(o['entradas'])}, saidas {brl_f(o['saidas'])}, saldo {brl_f(o['saldo'])}.",
+                                "insights": [
+                                    f"Total de {o['n_trans']} transacoes no periodo {o['periodo']}",
+                                    f"Maiores entradas: {top_e_txt[:120]}",
+                                    f"Maiores saidas: {top_s_txt[:120]}",
+                                ],
+                                "alertas": [{"tipo":"warn","texto":"Analise textual gerada diretamente dos dados OFX (JSON da IA incompleto)."}],
+                                "recomendacoes": ["Verifique as maiores saidas para RDMI Participacoes.","Acompanhe o saldo diario."],
+                                "transacoes_destaque": trans_dest,
+                            }
+                        else:
+                            st.session_state.ext_result = {
+                                "resumo":{"entradas":"—","saidas":"—","saldo":"—","transacoes":0},
+                                "parecer":"Nao foi possivel processar o arquivo.",
+                                "insights":["Tente exportar como CSV pelo internet banking."],
+                                "alertas":[{"tipo":"warn","texto":"Arquivo nao lido."}],
+                                "recomendacoes":["Use formato CSV ou OFX padrao."],
+                                "transacoes_destaque":[],
+                            }
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro na API: {e}")
+
 
 
     with col_r:
