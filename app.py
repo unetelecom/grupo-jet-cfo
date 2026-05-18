@@ -135,11 +135,23 @@ div[data-testid="stSidebar"] .stRadio label span{color:#AAA !important}
 # ESTADO GLOBAL
 # ══════════════════════════════════════════════════════════
 STAT_ZERO = dict(
+    # Clientes
     n_clientes=0, n_ativos=0, n_inad=0, n_suspensos=0, n_cancelados=0,
-    fat_total=0.0, fat_inad=0.0, fat_rec=0.0,
+    # Financeiro Hubsoft (4 categorias principais)
+    fat_total=0.0,      # Total faturado (todas as faturas emitidas)
+    fat_recebido=0.0,   # Total efetivamente recebido/pago
+    fat_a_receber=0.0,  # A receber (não vencido)
+    fat_atrasado=0.0,   # Em atraso (vencido e não pago)
+    fat_inad=0.0,       # Valor inadimplente (legado)
+    fat_rec=0.0,        # Estimativa recebimento
+    n_fat_recebido=0,   # Qtd faturas pagas
+    n_fat_a_receber=0,  # Qtd faturas a receber
+    n_fat_atrasado=0,   # Qtd faturas atrasadas
+    # Contas a pagar
     pag_total=0.0, pag_vencidas=0.0, pag_avencer=0.0,
     n_pag=0, n_pag_venc=0, n_pag_avenc=0,
-    inad_pct=0.0, rec_pct=0.0,
+    # Percentuais
+    inad_pct=0.0, rec_pct=0.0, adimplencia_pct=0.0,
 )
 for k, v in {
     "hub_df": None, "pag_df": None, "pag_classif": None,
@@ -224,26 +236,30 @@ def recalc():
     S    = STAT_ZERO.copy()
     srcs = []
 
-    # ── HUBSOFT ──
+    # ── HUBSOFT — 4 categorias financeiras ──
     if hub is not None and not hub.empty:
         srcs.append(f"Hubsoft ({len(hub)} reg.)")
         hub = hub.copy()
 
-        sc  = dcol(hub,"status","situacao","estado","situation")
-        nc  = dcol(hub,"mensalidade","valor","value","amount","mensal","monthly")
-        dc2 = dcol(hub,"diasatraso","dias","atraso","days","overdue")
-        vc  = dcol(hub,"valoraberto","aberto","debito","saldo","balance")
-        pc  = dcol(hub,"pagamento","pago","datapag","paid","payment")
+        # Detecta colunas por nome (aceita variações do Hubsoft)
+        sc   = dcol(hub,"status","situacao","estado","situation","situação")
+        nc   = dcol(hub,"mensalidade","valor","value","amount","mensal","monthly","valormensal","valorplano")
+        dc2  = dcol(hub,"diasatraso","dias","atraso","days","overdue","diasdeatraso")
+        vc   = dcol(hub,"valoraberto","aberto","debito","saldo","balance","valordevido","devido","valoratraso")
+        pc   = dcol(hub,"datapagamento","pagamento","pago","datapag","paid","payment","dtpagamento","datapag")
+        vpc  = dcol(hub,"valorpago","valorrecebido","recebido","amountpaid","paidamount")
+        venc = dcol(hub,"vencimento","datavencimento","vencto","duedate","datavenc","venc","dtavencimento")
+        vpc2 = dcol(hub,"valorafaturado","faturado","invoiced","valorcobranca","cobranca","valorliquido")
 
-        # Normaliza status
+        # ── Normaliza status ──
         if sc:
             hub["_st"] = hub[sc].astype(str).str.lower().str.strip()
         else:
             hub["_st"] = "ativo"
 
-        is_inad = hub["_st"].str.contains("inad|delinq", na=False)
-        is_susp = hub["_st"].str.contains("suspen", na=False)
-        is_canc = hub["_st"].str.contains("cancel", na=False)
+        is_inad = hub["_st"].str.contains("inad|delinq|atraso|inadim", na=False)
+        is_susp = hub["_st"].str.contains("suspen|bloq|suspens", na=False)
+        is_canc = hub["_st"].str.contains("cancel|inativ", na=False)
         is_ativ = ~(is_inad | is_susp | is_canc)
 
         S["n_clientes"]   = len(hub)
@@ -252,31 +268,119 @@ def recalc():
         S["n_suspensos"]  = int(is_susp.sum())
         S["n_cancelados"] = int(is_canc.sum())
 
+        # ── Valor base (mensalidade/valor do plano) ──
         if nc:
             hub["_mens"] = hub[nc].apply(pv)
-            S["fat_total"] = float(hub["_mens"].sum())
-            S["fat_inad"]  = float(hub.loc[is_inad,"_mens"].sum())
-            S["fat_rec"]   = float(hub.loc[is_ativ,"_mens"].sum() * 0.87)
         else:
             hub["_mens"] = 0.0
 
-        if S["fat_total"] > 0:
-            S["inad_pct"] = round(S["fat_inad"] / S["fat_total"] * 100, 1)
-            S["rec_pct"]  = round(S["fat_rec"]  / S["fat_total"] * 100, 1)
-
-        # DF inadimplentes
-        inad = hub[is_inad].copy()
-        inad["_val_ab"] = inad[vc].apply(pv) if vc else inad["_mens"]
-        inad["_dias"]   = inad[dc2].apply(lambda x: int(pv(x))) if dc2 else 0
-        st_session_inad = inad.sort_values("_val_ab", ascending=False)
-        st_session_hub  = hub
-
-        # DF recebidos
-        if pc:
-            rec_df = hub[hub[pc].notna() & (hub[pc].astype(str).str.strip() != "")].copy()
+        # ── FATURADO: total de mensalidades emitidas ──
+        # Usa coluna de valor faturado se existir, senão usa mensalidade
+        if vpc2:
+            hub["_fat"] = hub[vpc2].apply(pv)
         else:
-            rec_df = hub[is_ativ].copy()
+            hub["_fat"] = hub["_mens"]
+        S["fat_total"] = float(hub["_fat"].sum())
 
+        # ── RECEBIDO: efetivamente pago ──
+        # Detecta por: (1) coluna valor pago, (2) data pagamento preenchida,
+        # (3) status "pago/recebido", (4) fallback: ativos sem atraso
+        def detectar_recebido(row):
+            # Tem valor pago explícito?
+            if vpc and pv(row.get(vpc, 0)) > 0:
+                return True
+            # Tem data de pagamento preenchida?
+            if pc:
+                dp = str(row.get(pc, "")).strip()
+                if dp and dp not in ["", "nan", "None", "0", "NaT"]:
+                    return True
+            # Status indica pago?
+            s2 = str(row.get(sc, "") if sc else "").lower()
+            if any(x in s2 for x in ["pago","recebido","quitado","liquidado","paid"]):
+                return True
+            return False
+
+        hub["_recebido"] = hub.apply(detectar_recebido, axis=1)
+
+        if vpc:
+            hub["_val_rec"] = hub.apply(
+                lambda r: pv(r[vpc]) if r["_recebido"] else 0.0, axis=1)
+        else:
+            hub["_val_rec"] = hub.apply(
+                lambda r: r["_fat"] if r["_recebido"] else 0.0, axis=1)
+
+        S["fat_recebido"]   = float(hub["_val_rec"].sum())
+        S["n_fat_recebido"] = int(hub["_recebido"].sum())
+
+        # ── ATRASADO: vencido e não pago ──
+        def detectar_atrasado(row):
+            if row["_recebido"]: return False
+            # Tem dias de atraso?
+            if dc2:
+                d = pv(row.get(dc2, 0))
+                if d > 0: return True
+            # Tem valor em aberto?
+            if vc:
+                v2 = pv(row.get(vc, 0))
+                if v2 > 0: return True
+            # Status inadimplente?
+            if is_inad[row.name] if hasattr(row, "name") else False:
+                return True
+            # Data vencimento no passado?
+            if venc:
+                try:
+                    dv = pd.to_datetime(row.get(venc), dayfirst=True)
+                    if not pd.isna(dv) and dv < hoje:
+                        return True
+                except: pass
+            return False
+
+        hub["_atrasado"] = hub.apply(detectar_atrasado, axis=1)
+
+        if vc:
+            hub["_val_atraso"] = hub.apply(
+                lambda r: pv(r[vc]) if r["_atrasado"] else 0.0, axis=1)
+        else:
+            hub["_val_atraso"] = hub.apply(
+                lambda r: r["_fat"] if r["_atrasado"] else 0.0, axis=1)
+
+        S["fat_atrasado"]   = float(hub["_val_atraso"].sum())
+        S["n_fat_atrasado"] = int(hub["_atrasado"].sum())
+
+        # ── A RECEBER: não vencido e não pago ──
+        hub["_a_receber"] = ~hub["_recebido"] & ~hub["_atrasado"]
+
+        hub["_val_a_rec"] = hub.apply(
+            lambda r: r["_fat"] if r["_a_receber"] else 0.0, axis=1)
+
+        S["fat_a_receber"]   = float(hub["_val_a_rec"].sum())
+        S["n_fat_a_receber"] = int(hub["_a_receber"].sum())
+
+        # ── Legado e percentuais ──
+        S["fat_inad"] = S["fat_atrasado"]
+        S["fat_rec"]  = S["fat_recebido"]
+
+        if S["fat_total"] > 0:
+            S["adimplencia_pct"] = round(S["fat_recebido"] / S["fat_total"] * 100, 1)
+            S["inad_pct"]        = round(S["fat_atrasado"] / S["fat_total"] * 100, 1)
+            S["rec_pct"]         = S["adimplencia_pct"]
+
+        # Coluna de categoria financeira para exibição
+        def cat_fin(row):
+            if row["_recebido"]:  return "✅ Recebido"
+            if row["_atrasado"]:  return "🔴 Atrasado"
+            if row["_a_receber"]: return "🔵 A Receber"
+            return "⚪ Sem classif."
+        hub["_cat_fin"] = hub.apply(cat_fin, axis=1)
+
+        # ── DFs filtrados ──
+        inad = hub[hub["_atrasado"]].copy()
+        if dc2:  inad["_dias"]   = inad[dc2].apply(lambda x: int(pv(x)))
+        else:    inad["_dias"]   = 0
+        inad["_val_ab"] = inad["_val_atraso"]
+        st_session_inad = inad.sort_values("_val_ab", ascending=False)
+
+        rec_df = hub[hub["_recebido"]].copy()
         st_session_rec = rec_df
         st_session_hub = hub
     else:
@@ -383,9 +487,13 @@ def ctx_financeiro():
     return (
         f"DADOS REAIS JET TELECOM | Fonte: {src} | Atualização: {st.session_state.last_update or 'não importado'}\n"
         f"Clientes: {s['n_clientes']} total | {s['n_ativos']} ativos | {s['n_inad']} inad. | {s['n_suspensos']} susp.\n"
-        f"Faturamento: {brl(s['fat_total'])} | Inad.: {brl(s['fat_inad'])} ({s['inad_pct']}%) | Recebimento est.: {brl(s['fat_rec'])} ({s['rec_pct']}%)\n"
+        f"FINANCEIRO HUBSOFT:\n"
+        f"  Faturado total: {brl(s['fat_total'])}\n"
+        f"  Recebido: {brl(s['fat_recebido'])} ({s['n_fat_recebido']} faturas / {s['adimplencia_pct']}% adimplência)\n"
+        f"  A Receber: {brl(s['fat_a_receber'])} ({s['n_fat_a_receber']} faturas)\n"
+        f"  Atrasado: {brl(s['fat_atrasado'])} ({s['n_fat_atrasado']} faturas / {s['inad_pct']}% inadimplência)\n"
         f"Contas a pagar: {brl(s['pag_total'])} | Vencidas: {brl(s['pag_vencidas'])} ({s['n_pag_venc']}) | A vencer 7d: {brl(s['pag_avencer'])}\n"
-        f"Top inad.: {t_inad or 'nenhum'}\n"
+        f"Top atrasados: {t_inad or 'nenhum'}\n"
         f"Pagamentos urgentes: {t_pag or 'nenhum'}"
     )
 
@@ -916,61 +1024,165 @@ elif "Importar" in page:
                 else:
                     st.error("Não foi possível ler o arquivo.")
 
-    # KPIs cruzados
+    # ── KPIs e tabelas ──
     s = st.session_state.stats
     tem = s["n_clientes"] > 0 or s["n_pag"] > 0
     if tem:
         st.markdown("---")
-        st.markdown("**📊 Dados consolidados (cruzamento automático)**")
-        k1,k2,k3,k4,k5,k6 = st.columns(6)
-        k1.metric("Clientes",      s["n_clientes"])
-        k2.metric("Ativos",        s["n_ativos"])
-        k3.metric("Inadimplentes", s["n_inad"])
-        k4.metric("Faturamento",   brl(s["fat_total"]))
-        k5.metric("A Pagar",       brl(s["pag_total"]))
-        k6.metric("Vencidas",      brl(s["pag_vencidas"]), delta=f"{s['n_pag_venc']} contas", delta_color="inverse")
 
-        tab1,tab2,tab3,tab4 = st.tabs(["👥 Clientes","⚠️ Inadimplência","📋 Contas a Pagar","🤖 Análise CFO"])
+        # ── PAINEL FINANCEIRO 4 CATEGORIAS ──
+        st.markdown("### 💰 Painel Financeiro — Faturamento Hubsoft")
+        k1,k2,k3,k4 = st.columns(4)
+        with k1:
+            st.markdown(f"""
+            <div class="kpi" style="border-left:4px solid #555">
+              <div class="kpi-l">📋 Faturado</div>
+              <div class="kpi-v">{brl(s["fat_total"])}</div>
+              <div class="kpi-d muted">{s["n_clientes"]} clientes</div>
+            </div>""", unsafe_allow_html=True)
+        with k2:
+            pct_rec = s["adimplencia_pct"]
+            st.markdown(f"""
+            <div class="kpi" style="border-left:4px solid #22A85A">
+              <div class="kpi-l">✅ Recebido</div>
+              <div class="kpi-v" style="color:#22A85A">{brl(s["fat_recebido"])}</div>
+              <div class="kpi-d pos">{s["n_fat_recebido"]} faturas · {pct_rec}% do total</div>
+            </div>""", unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"""
+            <div class="kpi" style="border-left:4px solid #1D6FA4">
+              <div class="kpi-l">🔵 A Receber</div>
+              <div class="kpi-v" style="color:#1D6FA4">{brl(s["fat_a_receber"])}</div>
+              <div class="kpi-d muted">{s["n_fat_a_receber"]} faturas em aberto</div>
+            </div>""", unsafe_allow_html=True)
+        with k4:
+            pct_at = s["inad_pct"]
+            cor_at = "#D93025" if pct_at > 5 else "#D97706"
+            st.markdown(f"""
+            <div class="kpi" style="border-left:4px solid {cor_at}">
+              <div class="kpi-l">🔴 Atrasado</div>
+              <div class="kpi-v" style="color:{cor_at}">{brl(s["fat_atrasado"])}</div>
+              <div class="kpi-d neg">{s["n_fat_atrasado"]} faturas · {pct_at}% do total</div>
+            </div>""", unsafe_allow_html=True)
+
+        # Barra de composição visual
+        if s["fat_total"] > 0:
+            t = s["fat_total"]
+            p_rec = s["fat_recebido"]/t*100
+            p_are = s["fat_a_receber"]/t*100
+            p_ats = s["fat_atrasado"]/t*100
+            p_out = max(0, 100 - p_rec - p_are - p_ats)
+            st.markdown(f"""
+            <div style="margin:12px 0 4px;font-size:11px;color:#6E6E6E;font-weight:600">COMPOSIÇÃO DO FATURAMENTO</div>
+            <div style="display:flex;height:18px;border-radius:6px;overflow:hidden;gap:1px">
+              <div style="width:{p_rec:.1f}%;background:#22A85A;title:Recebido" title="Recebido {p_rec:.1f}%"></div>
+              <div style="width:{p_are:.1f}%;background:#1D6FA4" title="A Receber {p_are:.1f}%"></div>
+              <div style="width:{p_ats:.1f}%;background:#D93025" title="Atrasado {p_ats:.1f}%"></div>
+              <div style="width:{p_out:.1f}%;background:#DDD" title="Outros {p_out:.1f}%"></div>
+            </div>
+            <div style="display:flex;gap:16px;margin-top:5px;font-size:11px">
+              <span style="color:#22A85A">■ Recebido {p_rec:.1f}%</span>
+              <span style="color:#1D6FA4">■ A receber {p_are:.1f}%</span>
+              <span style="color:#D93025">■ Atrasado {p_ats:.1f}%</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
+            "👥 Todos Clientes",
+            "✅ Recebido",
+            "🔵 A Receber",
+            "🔴 Atrasado",
+            "📋 Contas a Pagar",
+            "🤖 Análise CFO"
+        ])
 
         with tab1:
             hub = st.session_state.hub_df
-            if hub is not None:
-                st.dataframe(limpar(hub), use_container_width=True, height=300, hide_index=True)
+            if hub is not None and not hub.empty:
+                df_v = limpar(hub).copy()
+                if "_cat_fin" in hub.columns: df_v.insert(0,"💰 Situação", hub["_cat_fin"])
+                if "_fat"     in hub.columns: df_v.insert(1,"Faturado",    hub["_fat"].apply(brl))
+                if "_val_rec" in hub.columns: df_v.insert(2,"Recebido",    hub["_val_rec"].apply(brl))
+                if "_val_a_rec" in hub.columns: df_v.insert(3,"A Receber", hub["_val_a_rec"].apply(brl))
+                if "_val_atraso" in hub.columns: df_v.insert(4,"Atrasado", hub["_val_atraso"].apply(brl))
+                # Filtro rápido
+                f_cat = st.selectbox("Filtrar por situação:",
+                    ["Todos","✅ Recebido","🔵 A Receber","🔴 Atrasado","⚪ Sem classif."],
+                    key="tab1_fcat")
+                if f_cat != "Todos" and "_cat_fin" in hub.columns:
+                    df_v = df_v[hub["_cat_fin"] == f_cat]
+                st.markdown(f"**{len(df_v)} registros**")
+                st.dataframe(df_v, use_container_width=True, height=340, hide_index=True)
+            else:
+                st.info("Importe a planilha Hubsoft.")
 
         with tab2:
+            hub = st.session_state.hub_df
+            if hub is not None and not hub.empty and "_recebido" in hub.columns:
+                df_r = limpar(hub[hub["_recebido"]]).copy()
+                if "_val_rec" in hub.columns:
+                    df_r["💵 Valor Recebido"] = hub[hub["_recebido"]]["_val_rec"].apply(brl)
+                total_r = s["fat_recebido"]
+                st.metric("Total Recebido", brl(total_r), f"{s['n_fat_recebido']} faturas")
+                st.dataframe(df_r, use_container_width=True, height=300, hide_index=True)
+            else:
+                st.info("Nenhum recebimento identificado nos dados.")
+
+        with tab3:
+            hub = st.session_state.hub_df
+            if hub is not None and not hub.empty and "_a_receber" in hub.columns:
+                df_ar = limpar(hub[hub["_a_receber"]]).copy()
+                if "_val_a_rec" in hub.columns:
+                    df_ar["🔵 A Receber"] = hub[hub["_a_receber"]]["_val_a_rec"].apply(brl)
+                st.metric("Total a Receber", brl(s["fat_a_receber"]), f"{s['n_fat_a_receber']} faturas")
+                st.dataframe(df_ar, use_container_width=True, height=300, hide_index=True)
+            else:
+                st.info("Nenhum valor a receber identificado.")
+
+        with tab4:
             inad = st.session_state.inad_df
             if inad is not None and not inad.empty:
                 df_i = limpar(inad).copy()
-                # adiciona colunas calculadas de forma legível
-                if "_val_ab" in inad.columns: df_i["Valor em Aberto"] = inad["_val_ab"].apply(brl)
-                if "_dias"   in inad.columns: df_i["Dias de Atraso"]  = inad["_dias"].astype(int)
-                st.metric("Total inadimplente", brl(inad["_val_ab"].sum()) if "_val_ab" in inad.columns else "—")
+                if "_val_ab" in inad.columns: df_i["🔴 Valor Atrasado"] = inad["_val_ab"].apply(brl)
+                if "_dias"   in inad.columns: df_i["⏱ Dias Atraso"]    = inad["_dias"].astype(int)
+                c1a, c2a, c3a = st.columns(3)
+                c1a.metric("Total Atrasado", brl(s["fat_atrasado"]))
+                c2a.metric("Nº de clientes", s["n_fat_atrasado"])
+                c3a.metric("% do faturamento", f"{s['inad_pct']}%")
                 st.dataframe(df_i, use_container_width=True, height=300, hide_index=True)
+                if st.button("🤖 Estratégia de cobrança IA", type="primary"):
+                    with st.spinner("Maxwell gerando estratégia..."):
+                        resp = cfo(f"Com {s['n_fat_atrasado']} clientes atrasados e {brl(s['fat_atrasado'])} em aberto, gere estratégia de cobrança segmentada por valor e dias de atraso.")
+                    st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
             else:
-                st.success("✅ Nenhuma inadimplência identificada.")
+                st.success("✅ Nenhum valor atrasado identificado nos dados.")
 
-        with tab3:
+        with tab5:
             pc = st.session_state.pag_classif
             if pc is not None and not pc.empty:
                 df_p = limpar(pc).copy()
-                if "_val"    in pc.columns: df_p["Valor"]      = pc["_val"].apply(brl)
-                if "_st_pag" in pc.columns: df_p["Status"]     = pc["_st_pag"]
-                if "_dias_v" in pc.columns: df_p["Dias p/Venc"] = pc["_dias_v"].apply(lambda x: x if x < 900 else "—")
+                if "_val"    in pc.columns: df_p["Valor"]       = pc["_val"].apply(brl)
+                if "_st_pag" in pc.columns: df_p["Status"]      = pc["_st_pag"]
+                if "_dias_v" in pc.columns: df_p["Dias p/Venc"] = pc["_dias_v"].apply(lambda x: int(x) if x < 900 else "—")
                 st.dataframe(df_p, use_container_width=True, height=300, hide_index=True)
             else:
                 st.info("Importe a planilha de contas a pagar.")
 
-        with tab4:
+        with tab6:
             if st.button("🤖 Gerar análise CFO completa com dados reais", type="primary", use_container_width=True):
                 with st.spinner("Maxwell analisando todos os dados..."):
                     resp = cfo(
-                        "Relatório executivo CFO: "
+                        f"Relatório executivo CFO: "
+                        f"Faturado={brl(s['fat_total'])}, Recebido={brl(s['fat_recebido'])}, "
+                        f"A Receber={brl(s['fat_a_receber'])}, Atrasado={brl(s['fat_atrasado'])}. "
                         "1) Diagnóstico e risco de liquidez "
                         "2) Prioridade de pagamentos justificada "
                         "3) Estratégia de cobrança segmentada "
                         "4) Alertas críticos e ações imediatas "
                         "5) Projeção 30 dias. "
-                        "Use APENAS dados reais. Seja preciso com os números.",
+                        "Use APENAS dados reais.",
                         max_tokens=1200
                     )
                 st.markdown(f'<div class="insight">{resp.replace(chr(10),"<br>")}</div>', unsafe_allow_html=True)
