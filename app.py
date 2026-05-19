@@ -1687,7 +1687,6 @@ tab_intel, tab_agenda, tab_hub, tab_crz, tab_recebidos, tab_categ, tab_lista, ta
     "📂 Por Categoria",
     f"📋 Lista Completa ({a['n_pend']})",
     f"⚠️ Não Cobertos ({a['n_nc']}) — {brl(a['total_nc'])}",
-    "🔗 Hubsoft",
     "🤖 Maxwell CFO",
 ])
 
@@ -2680,86 +2679,86 @@ with tab_hub:
                 hub.autenticar()
                 return hub.importar_tudo(mes), hub.cruzamento_clientes(mes=mes)
 
-                with st.spinner("🔄 Conectando ao Hubsoft..."):
-                    try:
-                        _hub_resultado, cli_df = _hub_fetch(
-                            hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes
-                        )
-                        st.session_state["hub_dados"] = True
-                        st.session_state.pop("hub_erro", None)
-                        st.success(f"✅ Hubsoft conectado — {hub_mes}")
-                        fin = _hub_resultado  # importar_tudo retorna dict
-                    except Exception as e:
-                        st.error(f"❌ Erro: {e}")
-                        st.code(str(e), language="text")
-                        st.session_state["hub_erro"] = str(e)
-                        fin, cli_df = {}, pd.DataFrame()
+            with st.spinner("🔄 Conectando ao Hubsoft..."):
+                try:
+                    _hub_resultado, cli_df = _hub_fetch(
+                        hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes
+                    )
+                    st.session_state["hub_dados"] = True
+                    st.session_state.pop("hub_erro", None)
+                    st.success(f"✅ Hubsoft conectado — {hub_mes}")
+                    fin = _hub_resultado
+                except Exception as e:
+                    st.error(f"❌ Erro: {e}")
+                    st.code(str(e), language="text")
+                    st.session_state["hub_erro"] = str(e)
+                    fin, cli_df = {}, pd.DataFrame()
 
-                totais = fin.get("totais", {})
-                if totais:
-                    # KPIs
-                    hk1,hk2,hk3,hk4,hk5 = st.columns(5)
-                    hk1.metric("📋 Faturado",  brl(totais["faturado"]),   f"{totais['n_cobrancas']} cobranças")
-                    hk2.metric("✅ Recebido",  brl(totais["recebido"]),   f"{totais['adimplencia']}% adimplência")
-                    hk3.metric("🔴 Atrasado",  brl(totais["atrasado"]),   f"{totais['n_atrasadas']} cobranças", delta_color="inverse")
-                    hk4.metric("🔵 A Vencer",  brl(totais["a_vencer"]),   f"{totais['n_a_vencer']} cobranças")
-                    hk5.metric("📈 A Receber", brl(totais["atrasado"]+totais["a_vencer"]))
+            totais = fin.get("totais", {})
+            if totais:
+                # KPIs
+                hk1,hk2,hk3,hk4,hk5 = st.columns(5)
+                hk1.metric("📋 Faturado",  brl(totais["faturado"]),   f"{totais['n_cobrancas']} cobranças")
+                hk2.metric("✅ Recebido",  brl(totais["recebido"]),   f"{totais['adimplencia']}% adimplência")
+                hk3.metric("🔴 Atrasado",  brl(totais["atrasado"]),   f"{totais['n_atrasadas']} cobranças", delta_color="inverse")
+                hk4.metric("🔵 A Vencer",  brl(totais["a_vencer"]),   f"{totais['n_a_vencer']} cobranças")
+                hk5.metric("📈 A Receber", brl(totais["atrasado"]+totais["a_vencer"]))
 
-                    st.markdown("---")
+                st.markdown("---")
 
-                    ht1,ht2,ht3,ht4 = st.tabs([
-                        f"👥 Clientes ({len(cli_df)})",
-                        f"✅ Pagas ({totais['n_pagas']})",
-                        f"🔴 Atrasadas ({totais['n_atrasadas']})",
-                        f"🔵 A Vencer ({totais['n_a_vencer']})",
-                    ])
+                ht1,ht2,ht3,ht4 = st.tabs([
+                    f"👥 Clientes ({len(cli_df)})",
+                    f"✅ Pagas ({totais['n_pagas']})",
+                    f"🔴 Atrasadas ({totais['n_atrasadas']})",
+                    f"🔵 A Vencer ({totais['n_a_vencer']})",
+                ])
 
-                    with ht1:
-                        if not cli_df.empty:
-                            hb1,hb2 = st.columns([3,2])
-                            with hb1: hbusca = st.text_input("🔍 Buscar:", key="hub_busca")
-                            with hb2: hfilt  = st.selectbox("Filtrar:", ["Todos","Com Atrasado","Sem Pagamento"], key="hub_filt")
-                            df_s = cli_df.copy()
-                            if hbusca: df_s = df_s[df_s["nome_cliente"].str.lower().str.contains(hbusca.lower(),na=False)]
-                            if hfilt=="Com Atrasado":    df_s = df_s[df_s["atrasado"]>0]
-                            elif hfilt=="Sem Pagamento": df_s = df_s[df_s["recebido"]==0]
-                            st.dataframe(pd.DataFrame({
-                                "Cliente":   df_s["nome_cliente"].str[:45],
-                                "Faturado":  df_s["faturado"].apply(brl),
-                                "Recebido":  df_s["recebido"].apply(brl),
-                                "Atrasado":  df_s["atrasado"].apply(brl),
-                                "A Vencer":  df_s["a_vencer"].apply(brl),
-                                "Adimpl.%":  df_s["adimplencia_pct"].apply(lambda v:f"{v:.1f}%"),
-                                "Cobranças": df_s["n_cob"].astype(int),
-                            }), use_container_width=True, hide_index=True, height=500)
+                with ht1:
+                    if not cli_df.empty:
+                        hb1,hb2 = st.columns([3,2])
+                        with hb1: hbusca = st.text_input("🔍 Buscar:", key="hub_busca")
+                        with hb2: hfilt  = st.selectbox("Filtrar:", ["Todos","Com Atrasado","Sem Pagamento"], key="hub_filt")
+                        df_s = cli_df.copy()
+                        if hbusca: df_s = df_s[df_s["nome_cliente"].str.lower().str.contains(hbusca.lower(),na=False)]
+                        if hfilt=="Com Atrasado":    df_s = df_s[df_s["atrasado"]>0]
+                        elif hfilt=="Sem Pagamento": df_s = df_s[df_s["recebido"]==0]
+                        st.dataframe(pd.DataFrame({
+                            "Cliente":   df_s["nome_cliente"].str[:45],
+                            "Faturado":  df_s["faturado"].apply(brl),
+                            "Recebido":  df_s["recebido"].apply(brl),
+                            "Atrasado":  df_s["atrasado"].apply(brl),
+                            "A Vencer":  df_s["a_vencer"].apply(brl),
+                            "Adimpl.%":  df_s["adimplencia_pct"].apply(lambda v:f"{v:.1f}%"),
+                            "Cobranças": df_s["n_cob"].astype(int),
+                        }), use_container_width=True, hide_index=True, height=500)
 
-                    def _render_df_cobrancas(df_c, key_sfx):
-                        if df_c.empty: return
-                        cols=[c for c in ["nome_cliente","valor","data_vencimento","data_pagamento","dias_atraso","descricao"] if c in df_c.columns]
-                        d2=df_c[cols].copy()
-                        for dc in ["data_vencimento","data_pagamento"]:
-                            if dc in d2.columns: d2[dc]=d2[dc].dt.strftime("%d/%m/%Y")
-                        if "valor" in d2.columns: d2["valor"]=df_c["valor"].apply(brl)
-                        st.dataframe(d2, use_container_width=True, hide_index=True, height=460)
+                def _render_df_cobrancas(df_c, key_sfx):
+                    if df_c.empty: return
+                    cols=[c for c in ["nome_cliente","valor","data_vencimento","data_pagamento","dias_atraso","descricao"] if c in df_c.columns]
+                    d2=df_c[cols].copy()
+                    for dc in ["data_vencimento","data_pagamento"]:
+                        if dc in d2.columns: d2[dc]=d2[dc].dt.strftime("%d/%m/%Y")
+                    if "valor" in d2.columns: d2["valor"]=df_c["valor"].apply(brl)
+                    st.dataframe(d2, use_container_width=True, hide_index=True, height=460)
 
-                    with ht2: _render_df_cobrancas(fin.get("pagas",pd.DataFrame()), "p")
-                    with ht3: _render_df_cobrancas(fin.get("atrasadas",pd.DataFrame()).sort_values("dias_atraso",ascending=False) if "dias_atraso" in fin.get("atrasadas",pd.DataFrame()).columns else fin.get("atrasadas",pd.DataFrame()), "a")
-                    with ht4: _render_df_cobrancas(fin.get("a_vencer",pd.DataFrame()), "v")
+                with ht2: _render_df_cobrancas(fin.get("pagas",pd.DataFrame()), "p")
+                with ht3: _render_df_cobrancas(fin.get("atrasadas",pd.DataFrame()).sort_values("dias_atraso",ascending=False) if "dias_atraso" in fin.get("atrasadas",pd.DataFrame()).columns else fin.get("atrasadas",pd.DataFrame()), "a")
+                with ht4: _render_df_cobrancas(fin.get("a_vencer",pd.DataFrame()), "v")
 
-                    # Exportar
-                    st.markdown("---")
-                    cobrancas_all = fin.get("cobrancas", pd.DataFrame())
-                    if not cobrancas_all.empty:
-                        import io as _io
-                        buf = _io.BytesIO()
-                        with pd.ExcelWriter(buf, engine="xlsxwriter") as wr:
-                            cobrancas_all.to_excel(wr, sheet_name="Cobranças", index=False)
-                            if not cli_df.empty: cli_df.to_excel(wr, sheet_name="Clientes", index=False)
-                        buf.seek(0)
-                        st.download_button("📥 Exportar Excel", buf,
-                            f"hubsoft_{hub_mes}.xlsx",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True, key="hub_export")
+                # Exportar
+                st.markdown("---")
+                cobrancas_all = fin.get("cobrancas", pd.DataFrame())
+                if not cobrancas_all.empty:
+                    import io as _io
+                    buf = _io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="xlsxwriter") as wr:
+                        cobrancas_all.to_excel(wr, sheet_name="Cobranças", index=False)
+                        if not cli_df.empty: cli_df.to_excel(wr, sheet_name="Clientes", index=False)
+                    buf.seek(0)
+                    st.download_button("📥 Exportar Excel", buf,
+                        f"hubsoft_{hub_mes}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="hub_export")
 
 
 # ══════════════════════════════════════════════════════════════════════
