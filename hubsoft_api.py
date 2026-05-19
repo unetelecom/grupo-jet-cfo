@@ -84,16 +84,14 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
 
 class HubsoftAPI:
 
-    # Endpoints em ordem de preferência:
-    # 1. /financeiro/fatura    → só faturas com boleto (retornou 190 para maio)
-    # 2. /cliente/financeiro   → cobranças + faturas por cliente (mais completo)
-    # 3. /financeiro/cobranca  → cobranças avulsas (pode retornar 1857)
+    # Endpoints confirmados pelo diagnóstico:
+    # /api/v1/integracao/financeiro        → 200, 190 registros, chave: "faturas"
+    # /api/v1/integracao/financeiro/fatura → 200, 190 registros, chave: "dados"
     COBRANCA_ENDPOINTS = [
-        "/api/v1/integracao/financeiro/fatura",
-        "/api/v1/integracao/financeiro/cobranca",
-        "/api/v1/integracao/cliente/financeiro",
-        "/financeiro/fatura",
-        "/financeiro/cobranca",
+        "/api/v1/integracao/financeiro/fatura",   # ✅ confirmado
+        "/api/v1/integracao/financeiro",          # ✅ confirmado (chave "faturas")
+        "/api/v1/integracao/financeiro/cobranca", # 404 neste servidor
+        "/api/v1/integracao/cliente/financeiro",  # 200 mas sem dados paginados
     ]
 
     def __init__(self, base_url, client_id, client_secret, username, password):
@@ -354,10 +352,20 @@ class HubsoftAPI:
         d_fim    = f"{mes}-{ult_dia:02d}"
 
         print(f"=== HUBSOFT importar_tudo({mes}) ===")
-        print(f"  Buscando faturas {d_ini} a {d_fim}...")
+        print(f"  Buscando cobranças {d_ini} a {d_fim}...")
 
-        cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
-        print(f"  → {len(cob_mes)} faturas no mês")
+        # Tenta GraphQL primeiro (retorna TODAS as cobranças incl. PIX/débito)
+        cob_mes = pd.DataFrame()
+        try:
+            cob_mes = self.get_cobrancas_graphql_all(d_ini, d_fim)
+            print(f"  → GraphQL: {len(cob_mes)} cobranças")
+        except Exception as gql_err:
+            print(f"  GraphQL indisponível ({str(gql_err)[:60]}), usando REST...")
+
+        # Fallback para REST se GraphQL falhar
+        if cob_mes.empty:
+            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
+            print(f"  → REST: {len(cob_mes)} faturas")
 
         try:
             clientes = self.get_clientes("ativo")
@@ -426,6 +434,94 @@ class HubsoftAPI:
             "a_vencer":      a_vencer,
             "totais":        totais,
         }
+
+    # ══════════════════════════════════════════════════════════════════
+    # API GRAPHQL — mais completa que REST
+    # Endpoint: /graphql/v1
+    # Permite buscar cobranças + faturas com todos os campos
+    # ══════════════════════════════════════════════════════════════════
+    def _graphql(self, query: str, variables: dict = None) -> dict:
+        """Executa uma query GraphQL."""
+        self._ok_token()
+        url = f"{self._base_ativo}/graphql/v1"
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+        r = self.s.post(url, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    def get_cobrancas_graphql(self, data_ini: str, data_fim: str,
+                              page: int = 1, per_page: int = 100) -> dict:
+        """
+        Busca cobranças via GraphQL — retorna TODAS incluindo PIX/débito.
+        data_ini/data_fim: 'YYYY-MM-DD'
+        """
+        query = """
+        query Cobrancas($page: Int, $first: Int, $de: String, $ate: String) {
+            cobrancas(page: $page, first: $first,
+                      de: $de, ate: $ate) {
+                paginatorInfo {
+                    currentPage
+                    lastPage
+                    total
+                }
+                data {
+                    id_cobranca
+                    id_cliente
+                    nome_razaosocial
+                    valor
+                    valor_pago
+                    recebido
+                    data_vencimento
+                    data_pagamento
+                    status
+                    descricao
+                    forma_pagamento
+                }
+            }
+        }
+        """
+        variables = {
+            "page": page,
+            "first": per_page,
+            "de": data_ini,
+            "ate": data_fim,
+        }
+        return self._graphql(query, variables)
+
+    def get_cobrancas_graphql_all(self, data_ini: str, data_fim: str,
+                                   per_page: int = 100) -> pd.DataFrame:
+        """
+        Busca TODAS as cobranças do período via GraphQL (com paginação automática).
+        """
+        all_data = []
+        page = 1
+        last_page = 1
+
+        while page <= last_page:
+            try:
+                resp = self.get_cobrancas_graphql(data_ini, data_fim, page, per_page)
+                result = resp.get("data", {}).get("cobrancas", {})
+                pag_info = result.get("paginatorInfo", {})
+                data = result.get("data", [])
+
+                if page == 1:
+                    last_page = pag_info.get("lastPage", 1)
+                    total = pag_info.get("total", "?")
+                    print(f"  GraphQL cobranças: total={total} páginas={last_page}")
+
+                all_data.extend(data)
+                page += 1
+
+            except Exception as e:
+                print(f"  GraphQL erro p.{page}: {e}")
+                break
+
+        print(f"  GraphQL carregou: {len(all_data)} cobranças")
+        if not all_data:
+            return pd.DataFrame()
+        return self._norm_cobrancas(pd.json_normalize(all_data))
 
     def cruzamento_clientes(self, cob_df=None, mes=None):
         if cob_df is None or (hasattr(cob_df,"empty") and cob_df.empty):

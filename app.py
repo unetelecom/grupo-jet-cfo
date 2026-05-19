@@ -2663,11 +2663,45 @@ with tab_hub:
                              hide_index=True, height=500)
                 ok_eps = [r for r in rows_ep if r["OK"]]
                 if ok_eps:
-                    st.success(f"✅ {len(ok_eps)} endpoints disponíveis:")
+                    st.success(f"✅ {len(ok_eps)} endpoints REST disponíveis:")
                     for r in ok_eps:
                         st.code(f"{r['Endpoint']}  →  total_registros={r['Total']}")
                 else:
-                    st.error("❌ Nenhum endpoint financeiro retornou dados")
+                    st.error("❌ Nenhum endpoint REST financeiro retornou dados")
+
+                # Testa GraphQL
+                st.markdown("**Testando API GraphQL (`/graphql/v1`):**")
+                gql_query = """query { cobrancas(page:1, first:1,
+                    de:"2026-05-01", ate:"2026-05-31") {
+                    paginatorInfo { total lastPage }
+                    data { id_cobranca nome_razaosocial valor status }
+                }}"""
+                try:
+                    r_gql = s2.post(
+                        f"{hub_url}/graphql/v1",
+                        json={"query": gql_query}, timeout=15
+                    )
+                    if r_gql.status_code == 200:
+                        gql_data = r_gql.json()
+                        pag = gql_data.get("data",{}).get("cobrancas",{}).get("paginatorInfo",{})
+                        total_gql = pag.get("total","?")
+                        pages_gql = pag.get("lastPage","?")
+                        if total_gql != "?":
+                            st.success(
+                                f"🎉 **GraphQL funcionando!** "
+                                f"Total cobranças: **{total_gql}** | "
+                                f"Páginas: **{pages_gql}**"
+                            )
+                            st.info(
+                                "✅ GraphQL retorna TODAS as cobranças (PIX + boleto + débito). "
+                                f"Você tem **{total_gql}** cobranças acessíveis via GraphQL!"
+                            )
+                        else:
+                            st.warning(f"GraphQL respondeu mas sem dados: {gql_data}")
+                    else:
+                        st.error(f"GraphQL: {r_gql.status_code} — {r_gql.text[:100]}")
+                except Exception as gql_e:
+                    st.error(f"GraphQL erro: {gql_e}")
 
 
         if not cred_ok:
