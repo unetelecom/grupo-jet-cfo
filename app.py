@@ -2669,37 +2669,51 @@ with tab_hub:
                 else:
                     st.error("❌ Nenhum endpoint REST financeiro retornou dados")
 
-                # Testa GraphQL
+                # Testa GraphQL com introspecção
                 st.markdown("**Testando API GraphQL (`/graphql/v1`):**")
-                gql_query = """query { cobrancas(page:1, first:1,
-                    de:"2026-05-01", ate:"2026-05-31") {
-                    paginatorInfo { total lastPage }
-                    data { id_cobranca nome_razaosocial valor status }
+                gql_url = f"{hub_url}/graphql/v1"
+
+                # Introspecção completa
+                intro_q = """{__schema{
+                  queryType{fields{name args{name}}}
+                  types{name fields{name}}
                 }}"""
                 try:
-                    r_gql = s2.post(
-                        f"{hub_url}/graphql/v1",
-                        json={"query": gql_query}, timeout=15
-                    )
-                    if r_gql.status_code == 200:
-                        gql_data = r_gql.json()
-                        pag = gql_data.get("data",{}).get("cobrancas",{}).get("paginatorInfo",{})
-                        total_gql = pag.get("total","?")
-                        pages_gql = pag.get("lastPage","?")
-                        if total_gql != "?":
-                            st.success(
-                                f"🎉 **GraphQL funcionando!** "
-                                f"Total cobranças: **{total_gql}** | "
-                                f"Páginas: **{pages_gql}**"
-                            )
-                            st.info(
-                                "✅ GraphQL retorna TODAS as cobranças (PIX + boleto + débito). "
-                                f"Você tem **{total_gql}** cobranças acessíveis via GraphQL!"
-                            )
-                        else:
-                            st.warning(f"GraphQL respondeu mas sem dados: {gql_data}")
+                    ri = s2.post(gql_url, json={"query": intro_q}, timeout=20)
+                    if ri.status_code != 200:
+                        st.error(f"GraphQL: HTTP {ri.status_code}")
                     else:
-                        st.error(f"GraphQL: {r_gql.status_code} — {r_gql.text[:100]}")
+                        sch = ri.json().get("data",{}).get("__schema",{})
+                        if not sch:
+                            st.warning(f"GraphQL sem schema: {ri.json()}")
+                        else:
+                            st.success("✅ GraphQL disponível! Analisando schema...")
+
+                            # Todas as queries
+                            all_q = [f["name"] for f in sch.get("queryType",{}).get("fields",[])]
+                            st.markdown("**Todas as queries disponíveis:**")
+                            st.code(str(sorted(all_q)))
+
+                            # Args das queries financeiras
+                            fin_queries = {}
+                            for f in sch.get("queryType",{}).get("fields",[]):
+                                nm = f["name"].lower()
+                                if any(x in nm for x in ["cobran","financ","fatura","receber","pagamento"]):
+                                    args = [a["name"] for a in f.get("args",[])]
+                                    fin_queries[f["name"]] = args
+
+                            if fin_queries:
+                                st.markdown("**Queries financeiras e seus parâmetros:**")
+                                for qn, qa in fin_queries.items():
+                                    st.code(f"{qn}({', '.join(qa)})")
+
+                            # Campos dos tipos financeiros
+                            for t in sch.get("types",[]):
+                                if any(x in t["name"].lower() for x in ["cobran","fatura","financ"])                                    and not t["name"].startswith("_") and t.get("fields"):
+                                    fields = [f["name"] for f in t["fields"]]
+                                    st.markdown(f"**Tipo `{t['name']}` — campos:**")
+                                    st.code(str(fields))
+
                 except Exception as gql_e:
                     st.error(f"GraphQL erro: {gql_e}")
 
