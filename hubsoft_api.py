@@ -500,8 +500,7 @@ class HubsoftAPI:
             # Remove campos com erro e tenta de novo
             campos_erro = []
             for e in erros:
-                import re as _re
-                m = _re.search(r'Cannot query field "(\w+)"', e)
+                m = __import__('re').search(r'Cannot query field "(\w+)"', e)
                 if m: campos_erro.append(m.group(1))
             print(f"  Removendo campos: {campos_erro}")
 
