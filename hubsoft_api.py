@@ -1,36 +1,26 @@
 """
 HUBSOFT API — Grupo Jet Telecom
-Auto-importação: clientes, cobranças pagas, abertas, atrasadas, a vencer.
+Versão definitiva — comunicação completa com REST + GraphQL
 """
+import re, time, calendar
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-import calendar, time, re
 
-IC_NOMES = {"RDMI", "RRD TELECOM", "GRUPO JET", "JET TELECOM", "RD TELECOM"}
+# ─────────────────────────────────────────────────────────────────────
+# Clientes intercompany (excluídos do faturamento)
+# ─────────────────────────────────────────────────────────────────────
+IC_NOMES = {"RDMI","RRD TELECOM","GRUPO JET","JET TELECOM","RD TELECOM"}
 
-OAUTH_PATHS = [
-    "/oauth/token",
-    "/api/oauth/token",
-    "/oauth/access-token",
-    "/api/v1/oauth/token",
-    "/api/v1/auth/token",
-]
+# ─────────────────────────────────────────────────────────────────────
+# AUTENTICAÇÃO OAuth2
+# ─────────────────────────────────────────────────────────────────────
+OAUTH_PATHS = ["/oauth/token", "/api/oauth/token", "/oauth/access-token"]
 
-
-def _base_urls(base):
-    urls = [base.rstrip("/")]
-    clean = re.sub(r"/api/?$", "", base.rstrip("/"))
-    if clean not in urls:
-        urls.append(clean)
-    if not clean.endswith("/api"):
-        candidate = clean + "/api"
-        if candidate not in urls:
-            urls.append(candidate)
-    return urls
-
-
-def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
+def _auth(base_url, client_id, client_secret, username, password):
+    """Autentica e retorna (token, base_url_ativo, path_usado)."""
+    s = requests.Session()
+    s.headers["Accept"] = "application/json"
     body = {
         "grant_type":    "password",
         "client_id":     str(client_id),
@@ -39,132 +29,115 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
         "password":      password,
     }
     errors = []
-    s = requests.Session()
-    s.headers["Accept"] = "application/json"
-
-    for base in _base_urls(base_url):
+    for base in [base_url.rstrip("/")]:
         for path in OAUTH_PATHS:
-            url = f"{base}{path}"
-            for ct_name, ct_header, kw in [
-                ("form", "application/x-www-form-urlencoded", {"data":  body}),
-                ("json", "application/json",                  {"json":  body}),
+            for ct, kw in [
+                ("application/x-www-form-urlencoded", {"data": body}),
+                ("application/json",                  {"json": body}),
             ]:
                 try:
-                    s.headers["Content-Type"] = ct_header
-                    r = s.post(url, timeout=15, **kw)
-                    if r.status_code == 404:
-                        errors.append(f"404 {base}{path}")
+                    r = s.post(f"{base}{path}",
+                               headers={"Content-Type": ct, "Accept": "application/json"},
+                               timeout=15, **kw)
+                    if r.status_code in (404, 405):
+                        errors.append(f"{r.status_code} {path} [{ct[:4]}]")
                         break
-                    if r.status_code == 405:
-                        errors.append(f"405 {base}{path} ({ct_name})")
-                        continue
                     if r.status_code not in (200, 201):
-                        errors.append(
-                            f"{r.status_code} {base}{path} ({ct_name}): "
-                            f"{r.text[:60].replace(chr(10),' ')}"
-                        )
+                        errors.append(f"{r.status_code} {path}: {r.text[:60]}")
                         continue
-                    data = r.json()
-                    tok = data.get("access_token") or data.get("token")
-                    if not tok:
-                        errors.append(f"sem_token {base}{path}: {str(data)[:60]}")
-                        continue
-                    return tok, base, path
-                except requests.exceptions.ConnectionError as ce:
-                    errors.append(f"conn_err {base}: {str(ce)[:60]}")
+                    tok = r.json().get("access_token") or r.json().get("token")
+                    if tok:
+                        return tok, base, path
+                    errors.append(f"sem_token {path}")
+                except requests.ConnectionError as e:
+                    errors.append(f"conn {base}: {e!s:.50}")
                     break
-                except Exception as ex:
-                    errors.append(f"err {base}{path}: {type(ex).__name__}:{str(ex)[:60]}")
+                except Exception as e:
+                    errors.append(f"err {path}: {e!s:.60}")
 
     raise ConnectionError(
-        "Hubsoft: falha em todos os endpoints testados.\n"
-        + "\n".join(f"  {e}" for e in errors[:20])
+        "Hubsoft: falha de autenticação.\n" +
+        "\n".join(f"  {e}" for e in errors[:15])
     )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# CLASSE PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────
 class HubsoftAPI:
 
-    # Endpoints — baseado no diagnóstico e documentação v1.99
-    # /cliente/financeiro → retorna TODOS tipos (boleto, débito, PIX) — v1.99
-    # /financeiro/fatura  → só boletos BTG, 190 registros confirmados
-    # /financeiro         → mesmo que /fatura, chave "faturas"
-    COBRANCA_ENDPOINTS = [
-        "/api/v1/integracao/cliente/financeiro",  # TODOS tipos (v1.99)
-        "/api/v1/integracao/financeiro/fatura",   # ✅ 190 boletos confirmado
-        "/api/v1/integracao/financeiro",          # ✅ 190 boletos (chave faturas)
-    ]
-
     def __init__(self, base_url, client_id, client_secret, username, password):
-        self.base_url      = base_url.rstrip("/")
-        self.client_id     = str(client_id)
-        self.client_secret = client_secret
-        self.username      = username
-        self.password      = password
-        self.token         = None
-        self.token_expiry  = None
-        self._base_ativo   = base_url
-        self.s             = requests.Session()
+        self._base    = base_url.rstrip("/")
+        self._cid     = str(client_id)
+        self._csec    = client_secret
+        self._user    = username
+        self._pass    = password
+        self._token   = None
+        self._expiry  = None
+        self._active  = base_url.rstrip("/")
+        self.s        = requests.Session()
         self.s.headers["Accept"] = "application/json"
+        # Cache do schema GraphQL
+        self._gql_schema = None
 
+    # ── AUTH ─────────────────────────────────────────────────────────
     def autenticar(self):
-        tok, base, path = autenticar_hubsoft(
-            self.base_url, self.client_id,
-            self.client_secret, self.username, self.password
-        )
-        self.token        = tok
-        self._base_ativo  = base
-        self.token_expiry = datetime.now() + timedelta(seconds=3540)
-        self.s.headers["Authorization"] = f"Bearer {self.token}"
-        return self.token
+        tok, base, path = _auth(self._base, self._cid, self._csec,
+                                 self._user, self._pass)
+        self._token  = tok
+        self._active = base
+        self._expiry = datetime.now() + timedelta(seconds=3540)
+        self.s.headers["Authorization"] = f"Bearer {tok}"
+        print(f"  Auth OK via {path}")
+        return tok
 
-    def _ok_token(self):
-        if not self.token or datetime.now() >= (self.token_expiry or datetime.min):
+    def _ensure_token(self):
+        if not self._token or datetime.now() >= (self._expiry or datetime.min):
             self.autenticar()
 
-    def _get(self, endpoint, params=None, tentativas=3):
-        self._ok_token()
-        url = f"{self._base_ativo}{endpoint}"
-        for t in range(tentativas):
+    # ── HTTP GET ──────────────────────────────────────────────────────
+    def _get(self, endpoint, params=None, retries=3):
+        self._ensure_token()
+        url = f"{self._active}{endpoint}"
+        for t in range(retries):
             try:
                 r = self.s.get(url, params=params or {}, timeout=30)
                 if r.status_code == 401:
                     self.autenticar()
                     r = self.s.get(url, params=params or {}, timeout=30)
                 if r.status_code == 404:
-                    raise requests.exceptions.HTTPError(f"404 Not Found: {url}")
+                    raise requests.HTTPError(f"404 {url}")
                 r.raise_for_status()
                 return r.json()
-            except requests.exceptions.Timeout:
-                if t == tentativas - 1:
-                    raise
+            except requests.Timeout:
+                if t == retries - 1: raise
                 time.sleep(2 ** t)
 
-    def _paginar(self, endpoint, params=None, limit=100, max_pag=500):
+    # ── PAGINAÇÃO REST ────────────────────────────────────────────────
+    def _paginar(self, endpoint, params=None, limit=100, max_pages=500):
+        """Percorre todas as páginas de um endpoint REST."""
         p = dict(params or {})
-        p["pagina"]           = 0
-        p["itens_por_pagina"] = limit
-        dados          = []
+        p.update({"pagina": 0, "itens_por_pagina": limit})
+        dados = []
         total_esperado = None
 
-        for n_pag in range(max_pag):
+        for pg in range(max_pages):
             resp = self._get(endpoint, p)
             pag  = resp.get("paginacao") or {}
 
-            # ── Extrai bloco de dados ──────────────────────────────────
+            # Extrai bloco de dados — tenta várias chaves conhecidas
             bloco = (
                 resp.get("dados") or resp.get("data") or
-                resp.get("clientes") or resp.get("contratos") or
-                resp.get("faturas") or resp.get("cobrancas") or []
+                resp.get("faturas") or resp.get("cobrancas") or
+                resp.get("clientes") or []
             )
 
-            # Loga na primeira página
-            if n_pag == 0:
-                total_esperado = pag.get("total_registros", "?")
-                ultima_pag     = pag.get("ultima_pagina", 0)
-                print(f"  Resp keys: {list(resp.keys())}")
-                print(f"  Paginacao: total={total_esperado} paginas={ultima_pag+1} itens/pag={limit}")
+            if pg == 0:
+                total_esperado = pag.get("total_registros")
+                ultima_pg = pag.get("ultima_pagina", 0)
+                print(f"  {endpoint}: total={total_esperado} págs={ultima_pg+1}")
                 if not bloco:
-                    print(f"  ATENCAO bloco vazio: {str(resp)[:300]}")
+                    print(f"  keys da resposta: {list(resp.keys())}")
 
             if isinstance(bloco, list):
                 dados.extend(bloco)
@@ -172,113 +145,217 @@ class HubsoftAPI:
                 dados.append(bloco)
 
             ultima = pag.get("ultima_pagina", 0)
-            atual  = pag.get("pagina_atual",  p["pagina"])
+            atual  = pag.get("pagina_atual", p["pagina"])
             if not bloco or atual >= ultima:
                 break
             p["pagina"] = atual + 1
 
-        total_str = str(total_esperado) if total_esperado else "?"
-        print(f"  Total carregado: {len(dados)}" +
-              (f" de {total_str}" if total_str != "?" else ""))
+        print(f"  → {len(dados)} registros carregados")
+        if total_esperado and len(dados) < int(total_esperado or 0):
+            print(f"  ⚠ incompleto: {len(dados)} de {total_esperado}")
         return dados
 
-    # ── CLIENTES ─────────────────────────────────────────────────────
-    def get_clientes(self, status="ativo"):
-        params = {} if status == "todos" else {"status": status}
-        for ep in ["/api/v1/integracao/cliente", "/api/v1/cliente"]:
-            try:
-                dados = self._paginar(ep, params)
-                if dados:
-                    df = pd.json_normalize(dados)
-                    rename = {
-                        "id": "id_cliente", "nome_razaosocial": "nome",
-                        "cpf_cnpj": "cpf_cnpj", "email": "email",
-                        "telefone": "telefone", "status": "status",
-                        "data_cadastro": "data_cadastro",
-                        "endereco.cidade": "cidade", "endereco.estado": "estado",
-                    }
-                    return df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
-            except Exception as e:
-                if "404" in str(e): continue
-                raise
-        return pd.DataFrame()
+    # ── GRAPHQL ───────────────────────────────────────────────────────
+    def _gql(self, query, variables=None):
+        """Executa query GraphQL."""
+        self._ensure_token()
+        url = f"{self._active}/graphql/v1"
+        r = self.s.post(url, json={"query": query, **({"variables": variables} if variables else {})},
+                        timeout=30)
+        r.raise_for_status()
+        return r.json()
 
-    # ── COBRANÇAS ─────────────────────────────────────────────────────
-    def get_cobrancas(self, data_ini, data_fim,
-                      tipo_data="vencimento", pago=None, status_pag=None):
+    def _gql_schema(self):
+        """Carrega o schema GraphQL (com cache)."""
+        if self._gql_schema:
+            return self._gql_schema
+        try:
+            resp = self._gql("""{
+              __schema {
+                queryType { fields { name args { name } } }
+                types { name fields { name } }
+              }
+            }""")
+            if resp.get("data"):
+                self._gql_schema = resp["data"]["__schema"]
+                # Loga queries financeiras disponíveis
+                queries = [f["name"] for f in self._gql_schema.get("queryType",{}).get("fields",[])]
+                fin_q = [q for q in queries if any(x in q.lower() for x in
+                         ["cobran","fatura","financ","receber","pagamento"])]
+                print(f"  GQL queries financeiras: {fin_q}")
+                # Loga campos do tipo Cobranca
+                for t in self._gql_schema.get("types",[]):
+                    if "cobran" in t["name"].lower() and not t["name"].startswith("_") and t.get("fields"):
+                        campos = [f["name"] for f in t["fields"]]
+                        print(f"  GQL tipo {t['name']}: {campos}")
+        except Exception as e:
+            print(f"  GQL schema erro: {e}")
+        return self._gql_schema
+
+    def _gql_cobrancas_all(self, data_ini, data_fim, per_page=100):
+        """
+        Busca cobranças via GraphQL.
+        Descobre automaticamente os campos e args corretos via introspecção.
+        """
+        schema = self._gql_schema()
+        if not schema:
+            return pd.DataFrame()
+
+        # Descobre args do query cobrancas
+        cob_args = []
+        cob_query_name = None
+        for f in schema.get("queryType",{}).get("fields",[]):
+            if "cobran" in f["name"].lower() or "fatura" in f["name"].lower():
+                cob_query_name = f["name"]
+                cob_args = [a["name"] for a in f.get("args",[])]
+                print(f"  GQL query: {cob_query_name}({cob_args})")
+                break
+
+        if not cob_query_name:
+            print("  GQL: query cobrancas não encontrada")
+            return pd.DataFrame()
+
+        # Descobre campos do tipo Cobranca
+        cob_fields = ["id", "valor", "data_vencimento", "status"]  # fallback
+        for t in schema.get("types",[]):
+            if "cobran" in t["name"].lower() and not t["name"].startswith("_") and t.get("fields"):
+                cob_fields = [f["name"] for f in t["fields"]]
+                break
+
+        # Remove campos problemáticos conhecidos
+        cob_fields = [f for f in cob_fields if f not in ("__typename",)]
+        fields_str = "\n".join(cob_fields[:30])
+
+        # Monta args de data com base nos args disponíveis
+        date_args = ""
+        if "de" in cob_args and "ate" in cob_args:
+            date_args = f', de:"{data_ini}", ate:"{data_fim}"'
+        elif "data_inicio" in cob_args and "data_fim" in cob_args:
+            date_args = f', data_inicio:"{data_ini}", data_fim:"{data_fim}"'
+        elif "data_vencimento_ini" in cob_args:
+            date_args = f', data_vencimento_ini:"{data_ini}", data_vencimento_fim:"{data_fim}"'
+
+        # Busca todas as páginas
+        all_data = []
+        page = 1
+        last_page = 1
+
+        while page <= last_page:
+            query = f"""
+            {{
+              {cob_query_name}(page:{page}, first:{per_page}{date_args}) {{
+                paginatorInfo {{ currentPage lastPage total }}
+                data {{ {fields_str} }}
+              }}
+            }}
+            """
+            try:
+                resp = self._gql(query)
+                if resp.get("errors"):
+                    # Tenta sem filtro de data se der erro
+                    if date_args and page == 1:
+                        print(f"  GQL erro com data, tentando sem filtro...")
+                        date_args = ""
+                        continue
+                    errs = [e["message"][:80] for e in resp["errors"][:3]]
+                    print(f"  GQL p{page} erros: {errs}")
+                    break
+
+                result   = resp.get("data",{}).get(cob_query_name,{})
+                pag_info = result.get("paginatorInfo",{})
+                data_raw = result.get("data",[])
+
+                if page == 1:
+                    last_page = pag_info.get("lastPage", 1)
+                    total     = pag_info.get("total","?")
+                    print(f"  GQL {cob_query_name}: total={total} págs={last_page}")
+                    if data_raw:
+                        print(f"  GQL campos retornados: {list(data_raw[0].keys())}")
+
+                all_data.extend(data_raw)
+                page += 1
+
+            except Exception as e:
+                print(f"  GQL p{page} erro: {e}")
+                break
+
+        if not all_data:
+            return pd.DataFrame()
+
+        df = self._norm(pd.json_normalize(all_data))
+
+        # Filtra por período se não foi filtrado na query
+        if not date_args and "data_vencimento" in df.columns:
+            mask = (
+                (df["data_vencimento"] >= pd.Timestamp(data_ini)) &
+                (df["data_vencimento"] <= pd.Timestamp(data_fim))
+            )
+            df = df[mask].copy()
+            print(f"  GQL filtrado client-side: {len(df)} cobranças")
+
+        return df
+
+    # ── REST COBRANÇAS ────────────────────────────────────────────────
+    def _rest_cobrancas(self, data_ini, data_fim):
         """
         Busca cobranças via REST.
-        Tenta múltiplas variações de endpoint e parâmetros.
+        Tenta múltiplos endpoints e variações de parâmetros.
+        Retorna o maior conjunto de dados encontrado.
         """
-        # Variações de params para cada endpoint
-        params_vencimento = {
-            "data_vencimento_ini": data_ini,
-            "data_vencimento_fim": data_fim,
-        }
-        params_data_geral = {
-            "data_inicio": data_ini,
-            "data_fim":    data_fim,
-        }
-        params_de_ate = {
-            "de":  data_ini,
-            "ate": data_fim,
-        }
-        params_custom = {
-            f"data_{tipo_data}_ini": data_ini,
-            f"data_{tipo_data}_fim": data_fim,
-        }
-        if pago is not None:
-            for p in [params_vencimento, params_data_geral, params_de_ate, params_custom]:
-                p["pago"] = int(pago)
-        if status_pag:
-            for p in [params_vencimento, params_data_geral, params_de_ate, params_custom]:
-                p["status_pagamento"] = status_pag
+        # Todos os endpoints e variações de params conhecidos
+        tentativas = []
 
-        # Lista priorizada: endpoint mais completo primeiro
-        tentativas = [
-            # /cliente/financeiro — retorna TODOS os tipos (boleto, débito, PIX)
-            ("/api/v1/integracao/cliente/financeiro", params_vencimento),
-            ("/api/v1/integracao/cliente/financeiro", params_data_geral),
-            ("/api/v1/integracao/cliente/financeiro", params_de_ate),
-            ("/api/v1/integracao/cliente/financeiro", {}),
-            # /financeiro/fatura — só boletos (190 confirmado)
-            ("/api/v1/integracao/financeiro/fatura", params_vencimento),
-            ("/api/v1/integracao/financeiro",         params_vencimento),
-        ]
+        # /cliente/financeiro — retorna TODOS os tipos (docs v1.99)
+        for params in [
+            {"data_vencimento_ini": data_ini, "data_vencimento_fim": data_fim},
+            {"data_inicio": data_ini, "data_fim": data_fim},
+            {"de": data_ini, "ate": data_fim},
+            {"data_ini": data_ini, "data_fim": data_fim},
+            {},  # sem filtro
+        ]:
+            tentativas.append(("/api/v1/integracao/cliente/financeiro", params))
+
+        # /financeiro/fatura — confirmado: 190 boletos
+        tentativas.append(("/api/v1/integracao/financeiro/fatura",
+                           {"data_vencimento_ini": data_ini, "data_vencimento_fim": data_fim}))
+
+        # /financeiro — confirmado: 190 boletos (chave "faturas")
+        tentativas.append(("/api/v1/integracao/financeiro",
+                           {"data_vencimento_ini": data_ini, "data_vencimento_fim": data_fim}))
 
         melhor = None
-        melhor_ep = ""
+        melhor_n = 0
         for ep, params in tentativas:
             try:
                 dados = self._paginar(ep, params)
-                if dados:
-                    df = self._norm_cobrancas(pd.json_normalize(dados))
-                    print(f"  {ep} -> {len(df)} registros")
-                    if melhor is None or len(df) > len(melhor):
+                if dados and len(dados) > melhor_n:
+                    df = self._norm(pd.json_normalize(dados))
+                    if len(df) > melhor_n:
                         melhor = df
-                        melhor_ep = ep
-                        if len(df) > 300:
-                            print(f"  ✅ Melhor resultado: {ep} -> {len(df)}")
-                            break
+                        melhor_n = len(df)
+                        print(f"  Melhor até agora: {ep} → {len(df)}")
+                        if len(df) > 500:
+                            break  # achou dados suficientes
             except Exception as e:
-                if "404" in str(e) or "Not Found" in str(e):
-                    continue
-                print(f"  Erro {ep}: {str(e)[:60]}")
+                if "404" not in str(e):
+                    print(f"  Erro {ep}: {e!s:.60}")
 
-        if melhor is not None:
-            print(f"  Usando: {melhor_ep} ({len(melhor)} registros)")
         return melhor if melhor is not None else pd.DataFrame()
 
-    # ── Normaliza cobranças ───────────────────────────────────────────
+    # ── NORMALIZAÇÃO ──────────────────────────────────────────────────
     @staticmethod
-    def _norm_cobrancas(df):
+    def _norm(df):
+        """Normaliza colunas e classifica status de pagamento."""
         if df.empty:
             return df
+
         today = pd.Timestamp.now().normalize()
-        rename = {
+
+        RENAME = {
             "id":                       "id_cobranca",
             "id_cliente":               "id_cliente",
             "nome_razaosocial":         "nome_cliente",
+            "nome":                     "nome_cliente",
             "cliente.nome_razaosocial": "nome_cliente",
             "cliente.nome":             "nome_cliente",
             "valor":                    "valor",
@@ -288,34 +365,49 @@ class HubsoftAPI:
             "data_pagamento":           "data_pagamento",
             "data_lancamento":          "data_lancamento",
             "status":                   "status_raw",
+            "situacao":                 "status_raw",
             "descricao":                "descricao",
+            "tipo_cobranca":            "tipo_cobranca",
+            "forma_pagamento":          "forma_pagamento",
         }
-        df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
-        for c in ["id_cobranca","nome_cliente","valor","data_vencimento","status_raw"]:
-            if c not in df.columns:
-                df[c] = None
+        df = df.rename(columns={k: v for k, v in RENAME.items() if k in df.columns})
+
+        # Garante colunas obrigatórias
+        for col in ["id_cobranca","nome_cliente","valor","data_vencimento","status_raw"]:
+            if col not in df.columns:
+                df[col] = None
+
+        # Converte datas
         for dc in ["data_vencimento","data_pagamento","data_lancamento"]:
             if dc in df.columns:
-                df[dc] = pd.to_datetime(df[dc], errors="coerce")
+                df[dc] = pd.to_datetime(df[dc], errors="coerce").dt.normalize()
+
+        # Converte valores
         for vc in ["valor","valor_pago"]:
             if vc in df.columns:
                 df[vc] = pd.to_numeric(df[vc], errors="coerce").fillna(0).abs()
 
-        # Log para diagnóstico
-        print(f"  Colunas API: {list(df.columns)}")
+        # Log diagnóstico
+        print(f"  Colunas: {list(df.columns)[:12]}")
         if "status_raw" in df.columns:
-            print(f"  Status valores: {df['status_raw'].fillna('VAZIO').astype(str).str.lower().unique()[:8].tolist()}")
+            sv = df["status_raw"].fillna("VAZIO").astype(str).str.lower().unique()
+            print(f"  Status valores: {list(sv[:8])}")
         if "recebido" in df.columns:
-            print(f"  Campo recebido sample: {df['recebido'].head(3).tolist()}")
+            print(f"  Campo recebido: {df['recebido'].head(3).tolist()}")
 
-        PAGO_STATUS = {
-            "pago","pago_total","pago_parcial","recebido","recebido_total",
-            "liquidado","liquidado_total","baixado_banco","baixado_pix",
-            "baixado_manual","baixado_faturamento","quitado","sim","yes","true","1",
+        # Classificação de status — multi-critério
+        PAGO = {
+            "pago","pago_total","pago_parcial",
+            "recebido","recebido_total","recebido_parcial",
+            "liquidado","liquidado_total","liquidado_parcial",
+            "baixado_banco","baixado_pix","baixado_manual",
+            "baixado_faturamento","baixado_cheque","baixado",
+            "quitado","quitado_parcial",
+            "sim","yes","true","1","s",
         }
 
-        def _st(row):
-            # 1. Campo recebido (booleano Hubsoft)
+        def _status(row):
+            # 1. Campo recebido
             rec = str(row.get("recebido","")).lower().strip()
             if rec in ("sim","yes","true","1","s"): return "PAGO"
             # 2. valor_pago > 0
@@ -327,83 +419,114 @@ class HubsoftAPI:
             if pd.notna(dp) and str(dp).strip() not in ("","None","NaT","nan"): return "PAGO"
             # 4. status_raw
             s = str(row.get("status_raw","")).lower().strip()
-            if s in PAGO_STATUS: return "PAGO"
+            if s in PAGO: return "PAGO"
             # 5. por vencimento
             d = row.get("data_vencimento")
             if pd.notna(d) and pd.Timestamp(d) < today: return "ATRASADO"
             return "A_VENCER"
 
-        df["status"] = df.apply(_st, axis=1)
+        df["status"] = df.apply(_status, axis=1)
         p = (df["status"]=="PAGO").sum()
         a = (df["status"]=="ATRASADO").sum()
         v = (df["status"]=="A_VENCER").sum()
-        print(f"  Classificados: PAGO={p} ATRASADO={a} A_VENCER={v}")
+        print(f"  Classificados: PAGO={p} ATR={a} AV={v}")
 
+        # Remove intercompany
         if "nome_cliente" in df.columns:
-            mask = df["nome_cliente"].fillna("").str.upper().apply(
+            mask_ic = df["nome_cliente"].fillna("").str.upper().apply(
                 lambda n: any(ic in n for ic in IC_NOMES))
-            df = df[~mask]
+            if mask_ic.any():
+                print(f"  Removendo {mask_ic.sum()} intercompany")
+                df = df[~mask_ic]
 
         df["dias_atraso"] = df["data_vencimento"].apply(
             lambda d: max(0,(today - pd.Timestamp(d)).days) if pd.notna(d) else 0)
-        df["valor_pendente"] = df.apply(
-            lambda r: 0.0 if r["status"]=="PAGO" else float(r.get("valor",0)), axis=1)
 
         return df.reset_index(drop=True)
 
+    # ── CLIENTES ──────────────────────────────────────────────────────
+    def get_clientes(self):
+        """Retorna DataFrame com todos os clientes ativos."""
+        for ep in ["/api/v1/integracao/cliente/todos",
+                   "/api/v1/integracao/cliente"]:
+            try:
+                dados = self._paginar(ep, {"status":"ativo"})
+                if dados:
+                    df = pd.json_normalize(dados)
+                    return df.rename(columns={"id":"id_cliente","nome_razaosocial":"nome"})
+            except Exception as e:
+                if "404" not in str(e): print(f"  Clientes {ep}: {e}")
+        return pd.DataFrame()
+
     # ── IMPORTAR TUDO ─────────────────────────────────────────────────
     def importar_tudo(self, mes=None):
+        """
+        Importa todas as cobranças do mês via GraphQL (preferencial) ou REST.
+        Retorna dict compatível com o app.py.
+        """
         if not mes:
             mes = datetime.now().strftime("%Y-%m")
-        ano, m   = map(int, mes.split("-"))
-        ult_dia  = calendar.monthrange(ano, m)[1]
-        d_ini    = f"{mes}-01"
-        d_fim    = f"{mes}-{ult_dia:02d}"
+        ano, m  = map(int, mes.split("-"))
+        ult_dia = calendar.monthrange(ano, m)[1]
+        d_ini   = f"{mes}-01"
+        d_fim   = f"{mes}-{ult_dia:02d}"
 
-        print(f"=== HUBSOFT importar_tudo({mes}) ===")
-        print(f"  Buscando cobranças {d_ini} a {d_fim}...")
+        print(f"\n{'='*50}")
+        print(f"HUBSOFT importar_tudo({mes}) — {d_ini} a {d_fim}")
+        print(f"{'='*50}")
 
-        # Tenta GraphQL primeiro (retorna TODAS as cobranças incl. PIX/débito)
+        # ── 1. Tenta GraphQL ─────────────────────────────────────────
         cob_mes = pd.DataFrame()
+        gql_ok  = False
         try:
-            cob_mes = self.get_cobrancas_graphql_all(d_ini, d_fim)
-            print(f"  → GraphQL: {len(cob_mes)} cobranças")
-        except Exception as gql_err:
-            print(f"  GraphQL indisponível ({str(gql_err)[:60]}), usando REST...")
+            print("\n[1] Tentando API GraphQL...")
+            cob_mes = self._gql_cobrancas_all(d_ini, d_fim)
+            if not cob_mes.empty:
+                print(f"  ✅ GraphQL: {len(cob_mes)} cobranças")
+                gql_ok = True
+        except Exception as e:
+            print(f"  GraphQL indisponível: {e!s:.80}")
 
-        # Fallback para REST se GraphQL falhar
+        # ── 2. Fallback REST ─────────────────────────────────────────
         if cob_mes.empty:
-            cob_mes = self.get_cobrancas(d_ini, d_fim, tipo_data="vencimento")
-            print(f"  → REST: {len(cob_mes)} faturas")
+            print("\n[2] Fallback REST...")
+            cob_mes = self._rest_cobrancas(d_ini, d_fim)
+            print(f"  REST: {len(cob_mes)} cobranças")
 
+        if cob_mes.empty:
+            print("  ⚠ Nenhuma cobrança encontrada!")
+            return self._resultado_vazio(mes)
+
+        # ── 3. Clientes ──────────────────────────────────────────────
+        print("\n[3] Buscando clientes...")
         try:
-            clientes = self.get_clientes("ativo")
-        except Exception:
+            clientes = self.get_clientes()
+            print(f"  {len(clientes)} clientes")
+        except Exception as e:
+            print(f"  Clientes erro: {e}")
             clientes = pd.DataFrame()
 
-        pagas     = cob_mes[cob_mes["status"]=="PAGO"]     if not cob_mes.empty else pd.DataFrame()
-        atrasadas = cob_mes[cob_mes["status"]=="ATRASADO"] if not cob_mes.empty else pd.DataFrame()
-        a_vencer  = cob_mes[cob_mes["status"]=="A_VENCER"] if not cob_mes.empty else pd.DataFrame()
+        # ── 4. Separa por status ─────────────────────────────────────
+        pagas     = cob_mes[cob_mes["status"]=="PAGO"].copy()
+        atrasadas = cob_mes[cob_mes["status"]=="ATRASADO"].copy()
+        a_vencer  = cob_mes[cob_mes["status"]=="A_VENCER"].copy()
 
-        # rec_df para o app (faturamento)
-        rec_df = pd.DataFrame()
-        if not cob_mes.empty:
-            rec_df = cob_mes.rename(columns={"nome_cliente":"nome_razaosocial"}).copy()
-            rec_df["__val"]    = pd.to_numeric(rec_df.get("valor",0), errors="coerce").fillna(0)
-            rec_df["__venc"]   = rec_df.get("data_vencimento")
-            rec_df["__nome"]   = rec_df.get("nome_razaosocial","").fillna("").astype(str)
-            # __pago: usa critério de status
-            status_pago_mask = rec_df.get("status", pd.Series()) == "PAGO"
-            if status_pago_mask.sum() == 0 and not pagas.empty:
-                id_col = "id_cobranca"
-                if id_col in rec_df.columns and id_col in pagas.columns:
-                    ids_p = set(pagas[id_col].astype(str))
-                    status_pago_mask = rec_df[id_col].astype(str).isin(ids_p)
-            rec_df["__pago"]   = status_pago_mask
-            rec_df["__nome_c"] = rec_df["__nome"]
+        # ── 5. rec_df (para o app — faturamento) ────────────────────
+        rec_df = cob_mes.rename(columns={"nome_cliente":"nome_razaosocial"}).copy()
+        rec_df["__val"]  = pd.to_numeric(rec_df.get("valor",0), errors="coerce").fillna(0)
+        rec_df["__venc"] = rec_df.get("data_vencimento")
+        rec_df["__nome"] = rec_df.get("nome_razaosocial","").fillna("").astype(str)
+        rec_df["__pago"] = rec_df["status"] == "PAGO"
+        # Fallback: se 0 pagos, usa col id para marcar os da cob pagas
+        if rec_df["__pago"].sum() == 0 and not pagas.empty:
+            id_col = "id_cobranca"
+            if id_col in rec_df.columns and id_col in pagas.columns:
+                ids_p = set(pagas[id_col].astype(str))
+                rec_df["__pago"] = rec_df[id_col].astype(str).isin(ids_p)
+        rec_df["__nome_c"] = rec_df["__nome"]
 
-        # rec_recebidos (equivale ao extrato)
-        cob_rec = pagas if not pagas.empty else pd.DataFrame()
+        # ── 6. rec_recebidos (equivale ao extrato) ──────────────────
+        cob_rec       = pagas if not pagas.empty else pd.DataFrame()
         rec_recebidos = pd.DataFrame()
         if not cob_rec.empty:
             rec_recebidos = pd.DataFrame({
@@ -414,24 +537,37 @@ class HubsoftAPI:
             })
             rec_recebidos = rec_recebidos[rec_recebidos["__val"] > 0]
 
-        totais = {
-            "faturado":      float(cob_mes["valor"].sum()) if not cob_mes.empty else 0.0,
-            "recebido":      float(rec_recebidos["__val"].sum()) if not rec_recebidos.empty else 0.0,
-            "atrasado":      float(atrasadas["valor"].sum()) if not atrasadas.empty else 0.0,
-            "a_vencer":      float(a_vencer["valor"].sum()) if not a_vencer.empty else 0.0,
-            "n_cobrancas":   len(cob_mes),
-            "n_pagas":       len(pagas),
-            "n_atrasadas":   len(atrasadas),
-            "n_a_vencer":    len(a_vencer),
-            "n_clientes":    len(clientes),
-            "adimplencia":   round(len(pagas)/max(len(cob_mes),1)*100,1),
-            "mes":           mes,
-            "fonte":         "hubsoft_api",
-            "atualizado_em": (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M"),
-        }
+        # ── 7. Totais ────────────────────────────────────────────────
+        faturado  = float(cob_mes["valor"].sum())
+        recebido  = float(rec_recebidos["__val"].sum()) if not rec_recebidos.empty else 0.0
+        atrasado  = float(atrasadas["valor"].sum()) if not atrasadas.empty else 0.0
+        av        = float(a_vencer["valor"].sum()) if not a_vencer.empty else 0.0
+        adimpl    = round(len(pagas)/max(len(cob_mes),1)*100,1)
+        brt_now   = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M")
 
-        print(f"  Totais: fat={totais['faturado']:.2f} rec={totais['recebido']:.2f} "
-              f"atr={totais['atrasado']:.2f} av={totais['a_vencer']:.2f}")
+        print(f"\n{'='*50}")
+        print(f"RESUMO {mes}: {len(cob_mes)} cobranças | "
+              f"Fat={faturado:.2f} | Rec={recebido:.2f} | "
+              f"Atr={atrasado:.2f} | AV={av:.2f} | "
+              f"Adimpl={adimpl}%")
+        print(f"Fonte: {'GraphQL' if gql_ok else 'REST'}")
+        print(f"{'='*50}\n")
+
+        totais = {
+            "faturado":     faturado,
+            "recebido":     recebido,
+            "atrasado":     atrasado,
+            "a_vencer":     av,
+            "n_cobrancas":  len(cob_mes),
+            "n_pagas":      len(pagas),
+            "n_atrasadas":  len(atrasadas),
+            "n_a_vencer":   len(a_vencer),
+            "n_clientes":   len(clientes),
+            "adimplencia":  adimpl,
+            "mes":          mes,
+            "fonte":        "graphql" if gql_ok else "rest",
+            "atualizado_em": brt_now,
+        }
 
         return {
             "rec_df":        rec_df,
@@ -444,177 +580,23 @@ class HubsoftAPI:
             "totais":        totais,
         }
 
-    # ══════════════════════════════════════════════════════════════════
-    # API GRAPHQL — mais completa que REST
-    # Endpoint: /graphql/v1
-    # Permite buscar cobranças + faturas com todos os campos
-    # ══════════════════════════════════════════════════════════════════
-    def _graphql(self, query: str, variables: dict = None) -> dict:
-        """Executa uma query GraphQL."""
-        self._ok_token()
-        url = f"{self._base_ativo}/graphql/v1"
-        payload = {"query": query}
-        if variables:
-            payload["variables"] = variables
-        r = self.s.post(url, json=payload, timeout=30)
-        r.raise_for_status()
-        return r.json()
+    def _resultado_vazio(self, mes):
+        brt = (datetime.utcnow()-timedelta(hours=3)).strftime("%d/%m/%Y %H:%M")
+        totais = {k:0 for k in ["faturado","recebido","atrasado","a_vencer",
+                                  "n_cobrancas","n_pagas","n_atrasadas","n_a_vencer","n_clientes"]}
+        totais.update({"adimplencia":0,"mes":mes,"fonte":"vazio","atualizado_em":brt})
+        empty = pd.DataFrame()
+        return {"rec_df":empty,"rec_recebidos":empty,"clientes":empty,
+                "cob_mes":empty,"pagas":empty,"atrasadas":empty,"a_vencer":empty,
+                "totais":totais}
 
-    def get_schema_graphql(self) -> dict:
-        """Introspecção do schema GraphQL para descobrir queries e campos."""
-        query = """
-        {
-          __schema {
-            queryType { fields { name args { name } } }
-            types {
-              name
-              fields { name }
-            }
-          }
-        }
-        """
-        return self._graphql(query)
-
-    def get_cobrancas_graphql(self, data_ini: str, data_fim: str,
-                              page: int = 1, per_page: int = 100) -> dict:
-        """
-        Busca cobranças via GraphQL — tenta múltiplas variações de parâmetros.
-        """
-        # Query GraphQL mínima — confirmada funcionar via diagnóstico
-        # cobrancas aceita: page, first (sem de/ate)
-        # Campos: id, valor, valor_pago, recebido, data_vencimento,
-        #         data_pagamento, status, descricao (sem nome_razaosocial)
-        query = """query($p:Int,$f:Int){
-            cobrancas(page:$p, first:$f){
-                paginatorInfo{ currentPage lastPage total }
-                data{
-                    id
-                    id_cliente
-                    valor
-                    valor_pago
-                    recebido
-                    data_vencimento
-                    data_pagamento
-                    status
-                    descricao
-                }
-            }
-        }"""
-        resp = self._graphql(query, {"p": page, "f": per_page})
-
-        # Se der erro de campo, tenta versão ultra-mínima
-        if resp.get("errors"):
-            erros = [e.get("message","") for e in resp["errors"]]
-            print(f"  GQL erros: {erros[:3]}")
-            # Remove campos com erro e tenta de novo
-            campos_erro = []
-            for e in erros:
-                m = __import__('re').search(r'Cannot query field "(\w+)"', e)
-                if m: campos_erro.append(m.group(1))
-            print(f"  Removendo campos: {campos_erro}")
-
-            # Query mínima garantida
-            query_min = """query($p:Int,$f:Int){
-                cobrancas(page:$p,first:$f){
-                    paginatorInfo{currentPage lastPage total}
-                    data{id valor data_vencimento status}
-                }
-            }"""
-            resp = self._graphql(query_min, {"p": page, "f": per_page})
-
-        return resp
-
-    def get_cobrancas_graphql_all(self, data_ini: str, data_fim: str,
-                                   per_page: int = 100) -> pd.DataFrame:
-        """
-        Busca TODAS as cobranças do período via GraphQL.
-        Descobre automaticamente os campos disponíveis.
-        """
-        # Primeiro descobre o schema
-        try:
-            schema = self.get_schema_graphql()
-            if schema.get("data"):
-                # Encontra campos do tipo Cobranca
-                types = schema["data"]["__schema"]["types"]
-                cob_type = next((t for t in types
-                                 if t["name"] in ("Cobranca","Cobrança","Financeiro")), None)
-                if cob_type and cob_type.get("fields"):
-                    fields = [f["name"] for f in cob_type["fields"]]
-                    print(f"  GQL campos Cobranca: {fields[:15]}")
-                    # Salva para uso na query
-                    self._gql_cob_fields = fields
-
-                # Encontra args do query cobrancas
-                qtypes = schema["data"]["__schema"]["queryType"]["fields"]
-                cob_q = next((q for q in qtypes
-                              if "cobran" in q["name"].lower()), None)
-                if cob_q:
-                    args = [a["name"] for a in cob_q.get("args", [])]
-                    print(f"  GQL cobrancas args: {args}")
-                    self._gql_cob_args = args
-        except Exception as schema_err:
-            print(f"  GQL schema erro: {schema_err}")
-
-        all_data = []
-        page = 1
-        last_page = 1
-
-        while page <= last_page:
-            try:
-                resp = self.get_cobrancas_graphql(data_ini, data_fim, page, per_page)
-                if resp.get("errors"):
-                    erros = resp["errors"]
-                    print(f"  GQL p.{page} erros: {str(erros)[:120]}")
-                    break
-
-                result = resp.get("data", {}).get("cobrancas", {})
-                if not result:
-                    data_keys = list(resp.get("data", {}).keys())
-                    print(f"  GQL data keys: {data_keys}")
-                    if data_keys:
-                        result = resp["data"][data_keys[0]]
-
-                pag_info = result.get("paginatorInfo", {})
-                data_raw = result.get("data", [])
-
-                if page == 1:
-                    last_page = pag_info.get("lastPage", 1)
-                    total    = pag_info.get("total", "?")
-                    print(f"  GQL: total={total} páginas={last_page}")
-                    if data_raw:
-                        print(f"  GQL campos: {list(data_raw[0].keys())}")
-
-                all_data.extend(data_raw)
-                page += 1
-
-            except Exception as e:
-                print(f"  GQL erro p.{page}: {e}")
-                break
-
-        print(f"  GQL carregou: {len(all_data)} registros (sem filtro de data)")
-
-        if not all_data:
-            return pd.DataFrame()
-
-        df = self._norm_cobrancas(pd.json_normalize(all_data))
-
-        # Filtra por período client-side (já que GQL não aceita filtro de data)
-        if not df.empty and "data_vencimento" in df.columns and data_ini and data_fim:
-            mask = (
-                (df["data_vencimento"] >= pd.Timestamp(data_ini)) &
-                (df["data_vencimento"] <= pd.Timestamp(data_fim))
-            )
-            df_filtrado = df[mask].copy()
-            print(f"  GQL filtrado por {data_ini}→{data_fim}: {len(df_filtrado)} registros")
-            return df_filtrado
-
-        return df
-
+    # ── CRUZAMENTO POR CLIENTE ────────────────────────────────────────
     def cruzamento_clientes(self, cob_df=None, mes=None):
         if cob_df is None or (hasattr(cob_df,"empty") and cob_df.empty):
             cob_df = self.importar_tudo(mes)["cob_mes"]
-        if cob_df.empty:
+        if cob_df.empty or "nome_cliente" not in cob_df.columns:
             return pd.DataFrame()
+
         g = cob_df.groupby("nome_cliente")
         cli = g.agg(
             faturado =("valor","sum"),
@@ -626,4 +608,105 @@ class HubsoftAPI:
             n_atr    =("status",lambda x:(x=="ATRASADO").sum()),
         ).reset_index()
         cli["adimplencia_pct"] = (cli["recebido"]/cli["faturado"].replace(0,1)*100).round(1)
-        return cli.sort_values("faturado",ascending=False)
+        return cli.sort_values("faturado", ascending=False)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# DIAGNÓSTICO
+# ─────────────────────────────────────────────────────────────────────
+def diagnosticar(hub_url, client_id, client_secret, username, password, mes="2026-05"):
+    """
+    Testa todos os endpoints disponíveis e retorna relatório.
+    Usado pela aba de diagnóstico no app.
+    """
+    import json
+    resultado = {"auth": None, "rest": [], "graphql": {}}
+
+    # Auth
+    try:
+        tok, base, path = _auth(hub_url, client_id, client_secret, username, password)
+        resultado["auth"] = {"ok": True, "token": tok[:20]+"...", "base": base, "path": path}
+    except Exception as e:
+        resultado["auth"] = {"ok": False, "erro": str(e)}
+        return resultado
+
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {tok}", "Accept": "application/json"})
+    d_ini, d_fim = f"{mes}-01", f"{mes}-31"
+
+    # Todos os endpoints a testar
+    endpoints = [
+        "/api/v1/integracao/financeiro/fatura",
+        "/api/v1/integracao/financeiro",
+        "/api/v1/integracao/financeiro/cobranca",
+        "/api/v1/integracao/cliente/financeiro",
+        "/api/v1/integracao/cliente/todos",
+        "/api/v1/integracao/cliente",
+    ]
+    param_sets = [
+        ("venc",       {"pagina":0,"itens_por_pagina":1,"data_vencimento_ini":d_ini,"data_vencimento_fim":d_fim}),
+        ("inicio/fim", {"pagina":0,"itens_por_pagina":1,"data_inicio":d_ini,"data_fim":d_fim}),
+        ("de/ate",     {"pagina":0,"itens_por_pagina":1,"de":d_ini,"ate":d_fim}),
+        ("sem_data",   {"pagina":0,"itens_por_pagina":1}),
+    ]
+
+    for ep in endpoints:
+        for plabel, params in param_sets:
+            try:
+                r = s.get(f"{base}{ep}", params=params, timeout=10)
+                total = ""
+                keys  = ""
+                try:
+                    d = r.json()
+                    pag   = d.get("paginacao",{})
+                    total = str(pag.get("total_registros","—"))
+                    keys  = str(list(d.keys()))[:70]
+                except: keys = r.text[:50]
+                resultado["rest"].append({
+                    "Endpoint": ep, "Params": plabel,
+                    "Status": r.status_code, "Total": total,
+                    "Keys": keys, "OK": r.status_code==200,
+                })
+                if r.status_code == 200: break  # não precisa testar outras variações
+            except Exception as ex:
+                resultado["rest"].append({
+                    "Endpoint":ep,"Params":plabel,"Status":"Err",
+                    "Total":"","Keys":str(ex)[:50],"OK":False})
+                break
+
+    # GraphQL
+    try:
+        r_gql = s.post(f"{base}/graphql/v1", json={"query":"""{
+          __schema {
+            queryType { fields { name args { name } } }
+            types { name fields { name } }
+          }
+        }"""}, timeout=15)
+        if r_gql.status_code == 200:
+            schema = r_gql.json().get("data",{}).get("__schema",{})
+            if schema:
+                all_queries = [f["name"] for f in schema.get("queryType",{}).get("fields",[])]
+                fin_queries = {}
+                for f in schema.get("queryType",{}).get("fields",[]):
+                    nm = f["name"].lower()
+                    if any(x in nm for x in ["cobran","fatura","financ","receber"]):
+                        fin_queries[f["name"]] = [a["name"] for a in f.get("args",[])]
+                cob_fields = {}
+                for t in schema.get("types",[]):
+                    if any(x in t["name"].lower() for x in ["cobran","fatura"]) \
+                       and not t["name"].startswith("_") and t.get("fields"):
+                        cob_fields[t["name"]] = [f["name"] for f in t["fields"]]
+                resultado["graphql"] = {
+                    "ok": True,
+                    "all_queries": all_queries,
+                    "fin_queries": fin_queries,
+                    "types": cob_fields,
+                }
+            else:
+                resultado["graphql"] = {"ok": False, "resp": r_gql.json()}
+        else:
+            resultado["graphql"] = {"ok": False, "status": r_gql.status_code}
+    except Exception as e:
+        resultado["graphql"] = {"ok": False, "erro": str(e)}
+
+    return resultado
