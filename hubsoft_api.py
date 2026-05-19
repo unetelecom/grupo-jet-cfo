@@ -84,14 +84,14 @@ def autenticar_hubsoft(base_url, client_id, client_secret, username, password):
 
 class HubsoftAPI:
 
-    # Endpoints confirmados pelo diagnóstico:
-    # /api/v1/integracao/financeiro        → 200, 190 registros, chave: "faturas"
-    # /api/v1/integracao/financeiro/fatura → 200, 190 registros, chave: "dados"
+    # Endpoints — baseado no diagnóstico e documentação v1.99
+    # /cliente/financeiro → retorna TODOS tipos (boleto, débito, PIX) — v1.99
+    # /financeiro/fatura  → só boletos BTG, 190 registros confirmados
+    # /financeiro         → mesmo que /fatura, chave "faturas"
     COBRANCA_ENDPOINTS = [
-        "/api/v1/integracao/financeiro/fatura",   # ✅ confirmado
-        "/api/v1/integracao/financeiro",          # ✅ confirmado (chave "faturas")
-        "/api/v1/integracao/financeiro/cobranca", # 404 neste servidor
-        "/api/v1/integracao/cliente/financeiro",  # 200 mas sem dados paginados
+        "/api/v1/integracao/cliente/financeiro",  # TODOS tipos (v1.99)
+        "/api/v1/integracao/financeiro/fatura",   # ✅ 190 boletos confirmado
+        "/api/v1/integracao/financeiro",          # ✅ 190 boletos (chave faturas)
     ]
 
     def __init__(self, base_url, client_id, client_secret, username, password):
@@ -206,58 +206,67 @@ class HubsoftAPI:
     # ── COBRANÇAS ─────────────────────────────────────────────────────
     def get_cobrancas(self, data_ini, data_fim,
                       tipo_data="vencimento", pago=None, status_pag=None):
-        # Monta params — tenta variações de nome de campo de data
+        """
+        Busca cobranças via REST.
+        Tenta múltiplas variações de endpoint e parâmetros.
+        """
+        # Variações de params para cada endpoint
         params_vencimento = {
             "data_vencimento_ini": data_ini,
             "data_vencimento_fim": data_fim,
         }
-        params_lancamento = {
-            "data_lancamento_ini": data_ini,
-            "data_lancamento_fim": data_fim,
+        params_data_geral = {
+            "data_inicio": data_ini,
+            "data_fim":    data_fim,
         }
-        params_criacao = {
-            "data_criacao_ini": data_ini,
-            "data_criacao_fim": data_fim,
+        params_de_ate = {
+            "de":  data_ini,
+            "ate": data_fim,
         }
         params_custom = {
             f"data_{tipo_data}_ini": data_ini,
             f"data_{tipo_data}_fim": data_fim,
         }
         if pago is not None:
-            for p in [params_vencimento, params_lancamento, params_criacao, params_custom]:
+            for p in [params_vencimento, params_data_geral, params_de_ate, params_custom]:
                 p["pago"] = int(pago)
         if status_pag:
-            for p in [params_vencimento, params_lancamento, params_criacao, params_custom]:
+            for p in [params_vencimento, params_data_geral, params_de_ate, params_custom]:
                 p["status_pagamento"] = status_pag
 
-        # Lista de (endpoint, params) para tentar
-        tentativas = []
-        for ep in self.COBRANCA_ENDPOINTS:
-            tentativas.append((ep, params_vencimento))
-            if tipo_data != "vencimento":
-                tentativas.append((ep, params_custom))
-            tentativas.append((ep, params_lancamento))
+        # Lista priorizada: endpoint mais completo primeiro
+        tentativas = [
+            # /cliente/financeiro — retorna TODOS os tipos (boleto, débito, PIX)
+            ("/api/v1/integracao/cliente/financeiro", params_vencimento),
+            ("/api/v1/integracao/cliente/financeiro", params_data_geral),
+            ("/api/v1/integracao/cliente/financeiro", params_de_ate),
+            ("/api/v1/integracao/cliente/financeiro", {}),
+            # /financeiro/fatura — só boletos (190 confirmado)
+            ("/api/v1/integracao/financeiro/fatura", params_vencimento),
+            ("/api/v1/integracao/financeiro",         params_vencimento),
+        ]
 
         melhor = None
+        melhor_ep = ""
         for ep, params in tentativas:
             try:
                 dados = self._paginar(ep, params)
                 if dados:
                     df = self._norm_cobrancas(pd.json_normalize(dados))
-                    print(f"  {ep} [{list(params.keys())[0]}] -> {len(df)} registros")
-                    # Escolhe o que retornar mais registros
+                    print(f"  {ep} -> {len(df)} registros")
                     if melhor is None or len(df) > len(melhor):
                         melhor = df
-                        # Se já tem um bom resultado com /fatura, tenta /cobranca tbm
-                        if "fatura" in ep and len(df) < 500:
-                            continue  # continua para ver se cobranca tem mais
-                        else:
+                        melhor_ep = ep
+                        if len(df) > 300:
+                            print(f"  ✅ Melhor resultado: {ep} -> {len(df)}")
                             break
             except Exception as e:
                 if "404" in str(e) or "Not Found" in str(e):
                     continue
                 print(f"  Erro {ep}: {str(e)[:60]}")
 
+        if melhor is not None:
+            print(f"  Usando: {melhor_ep} ({len(melhor)} registros)")
         return melhor if melhor is not None else pd.DataFrame()
 
     # ── Normaliza cobranças ───────────────────────────────────────────
