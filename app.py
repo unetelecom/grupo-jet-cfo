@@ -2547,36 +2547,82 @@ with tab_hub:
         if btn_diag and cred_ok:
             st.markdown("#### 🔍 Diagnóstico de Conexão")
             import requests as _req
+
+            # Autenticação
+            token_achado = None
             paths = ["/oauth/token","/api/oauth/token","/oauth/access-token","/api/v1/oauth/token"]
             body  = {"grant_type":"password","client_id":hub_cid,"client_secret":hub_csec,
                      "username":hub_user,"password":hub_pass}
-            rows  = []
-            token_achado = None
             for path in paths:
-                url_t = f"{hub_url}{path}"
-                for ct, kw in [("form-urlencoded",{"data":body}),("json",{"json":body})]:
-                    try:
-                        r = _req.post(url_t, headers={"Content-Type":
-                            "application/x-www-form-urlencoded" if ct=="form-urlencoded"
-                            else "application/json","Accept":"application/json"},
-                            timeout=15, **kw)
-                        status = r.status_code
-                        msg    = r.text[:80].replace(chr(10)," ")
-                        ok     = status in (200,201) and "access_token" in r.text
-                        if ok and not token_achado:
-                            token_achado = (path, ct, r.json().get("access_token","")[:20])
-                        rows.append({"Endpoint":path,"Content-Type":ct,
-                                     "Status":status,"✅":ok,"Resposta":msg})
-                    except Exception as e:
-                        rows.append({"Endpoint":path,"Content-Type":ct,
-                                     "Status":"Erro","✅":False,"Resposta":str(e)[:80]})
-            import pandas as _pd2
-            st.dataframe(_pd2.DataFrame(rows), use_container_width=True, hide_index=True)
-            if token_achado:
-                st.success(f"✅ Token obtido via **{token_achado[0]}** com **{token_achado[1]}**")
-                st.info(f"Token (início): `{token_achado[2]}...`")
+                try:
+                    r = _req.post(f"{hub_url}{path}", data=body,
+                                  headers={"Content-Type":"application/x-www-form-urlencoded",
+                                           "Accept":"application/json"}, timeout=15)
+                    if r.status_code == 200 and "access_token" in r.text:
+                        token_achado = r.json().get("access_token","")
+                        st.success(f"✅ Autenticado via `{path}`")
+                        break
+                except: pass
+
+            if not token_achado:
+                st.error("❌ Falha na autenticação")
             else:
-                st.error("❌ Nenhum endpoint retornou token válido")
+                st.markdown("**Testando todos os endpoints financeiros:**")
+                s2 = _req.Session()
+                s2.headers.update({"Authorization":f"Bearer {token_achado}","Accept":"application/json"})
+                eps_testar = [
+                    "/api/v1/integracao/financeiro/fatura",
+                    "/api/v1/integracao/financeiro/cobranca",
+                    "/api/v1/integracao/financeiro/cobrancas",
+                    "/api/v1/integracao/financeiro/conta_receber",
+                    "/api/v1/integracao/financeiro/contas_receber",
+                    "/api/v1/integracao/financeiro/receber",
+                    "/api/v1/integracao/financeiro/movimento",
+                    "/api/v1/integracao/financeiro",
+                    "/api/v1/integracao/cobranca",
+                    "/api/v1/integracao/cliente/financeiro",
+                    "/api/v1/integracao/cliente",
+                    "/api/v1/integracao",
+                ]
+                rows_ep = []
+                for ep in eps_testar:
+                    for params_t, plabel in [
+                        ({"pagina":0,"itens_por_pagina":1,
+                          "data_vencimento_ini":"2026-05-01",
+                          "data_vencimento_fim":"2026-05-31"}, "c/data"),
+                        ({"pagina":0,"itens_por_pagina":1}, "s/data"),
+                    ]:
+                        try:
+                            r2 = s2.get(f"{hub_url}{ep}", params=params_t, timeout=10)
+                            total = ""; chaves = ""
+                            try:
+                                d2 = r2.json()
+                                pag = d2.get("paginacao",{})
+                                total = str(pag.get("total_registros","—"))
+                                chaves = str(list(d2.keys()))[:60]
+                            except: chaves = r2.text[:50]
+                            rows_ep.append({
+                                "Endpoint":ep, "Params":plabel,
+                                "Status":r2.status_code, "Total":total,
+                                "Keys":chaves, "OK":r2.status_code==200,
+                            })
+                            if r2.status_code == 200: break
+                        except Exception as ex:
+                            rows_ep.append({
+                                "Endpoint":ep,"Params":plabel,"Status":"Err",
+                                "Total":"","Keys":str(ex)[:50],"OK":False})
+                            break
+                import pandas as _pd2
+                st.dataframe(_pd2.DataFrame(rows_ep), use_container_width=True,
+                             hide_index=True, height=500)
+                ok_eps = [r for r in rows_ep if r["OK"]]
+                if ok_eps:
+                    st.success(f"✅ {len(ok_eps)} endpoints disponíveis:")
+                    for r in ok_eps:
+                        st.code(f"{r['Endpoint']}  →  total_registros={r['Total']}")
+                else:
+                    st.error("❌ Nenhum endpoint financeiro retornou dados")
+
 
         if not cred_ok:
             st.warning("Preencha as credenciais acima.")
