@@ -2528,6 +2528,92 @@ with tab_nc:
 # ══════════════════════════════════════════════════════════════════════
 # TAB HUBSOFT — INTEGRAÇÃO AO VIVO
 # ══════════════════════════════════════════════════════════════════════
+# ── Diagnóstico embutido (fallback quando hubsoft_api.py antigo) ─────
+def _diagnostico_embutido(hub_url, cid, csec, user, pwd, mes="2026-05"):
+    import requests as _rq2
+    resultado = {"auth": {}, "rest": [], "graphql": {}}
+    body = {"grant_type":"password","client_id":cid,"client_secret":csec,
+            "username":user,"password":pwd}
+    tok = None
+    base = hub_url.rstrip("/")
+    for path in ["/oauth/token","/api/oauth/token"]:
+        try:
+            r = _rq2.post(f"{base}{path}", data=body,
+                          headers={"Content-Type":"application/x-www-form-urlencoded",
+                                   "Accept":"application/json"}, timeout=10)
+            if r.status_code == 200 and "access_token" in r.text:
+                tok = r.json().get("access_token","")
+                resultado["auth"] = {"ok":True,"path":path,"base":base,"token":tok[:20]+"..."}
+                break
+        except: pass
+    if not tok:
+        resultado["auth"] = {"ok":False,"erro":"falha de autenticação"}
+        return resultado
+
+    s2 = _rq2.Session()
+    s2.headers.update({"Authorization":f"Bearer {tok}","Accept":"application/json"})
+    d_ini, d_fim = f"{mes}-01", f"{mes}-31"
+    eps = [
+        ("/api/v1/integracao/financeiro/fatura","venc",
+         {"pagina":0,"itens_por_pagina":1,"data_vencimento_ini":d_ini,"data_vencimento_fim":d_fim}),
+        ("/api/v1/integracao/financeiro","venc",
+         {"pagina":0,"itens_por_pagina":1,"data_vencimento_ini":d_ini,"data_vencimento_fim":d_fim}),
+        ("/api/v1/integracao/cliente/financeiro","venc",
+         {"pagina":0,"itens_por_pagina":1,"data_vencimento_ini":d_ini,"data_vencimento_fim":d_fim}),
+        ("/api/v1/integracao/cliente/financeiro","inicio/fim",
+         {"pagina":0,"itens_por_pagina":1,"data_inicio":d_ini,"data_fim":d_fim}),
+        ("/api/v1/integracao/cliente/financeiro","de/ate",
+         {"pagina":0,"itens_por_pagina":1,"de":d_ini,"ate":d_fim}),
+        ("/api/v1/integracao/cliente/financeiro","sem_data",
+         {"pagina":0,"itens_por_pagina":1}),
+        ("/api/v1/integracao/cliente","sem_data",{"pagina":0,"itens_por_pagina":1}),
+    ]
+    for ep, plabel, params in eps:
+        try:
+            r2 = s2.get(f"{base}{ep}", params=params, timeout=10)
+            total=""; keys=""
+            try:
+                d2 = r2.json()
+                pag = d2.get("paginacao",{})
+                total = str(pag.get("total_registros","—"))
+                keys  = str(list(d2.keys()))[:70]
+            except: keys = r2.text[:50]
+            resultado["rest"].append({"Endpoint":ep,"Params":plabel,
+                "Status":r2.status_code,"Total":total,"Keys":keys,"OK":r2.status_code==200})
+        except Exception as ex:
+            resultado["rest"].append({"Endpoint":ep,"Params":plabel,
+                "Status":"Err","Total":"","Keys":str(ex)[:50],"OK":False})
+
+    # GraphQL
+    try:
+        rg = s2.post(f"{base}/graphql/v1", json={"query":"""{
+          __schema {
+            queryType{fields{name args{name}}}
+            types{name fields{name}}
+          }
+        }"""}, timeout=15)
+        if rg.status_code == 200:
+            sch = rg.json().get("data",{}).get("__schema",{})
+            if sch:
+                all_q = [f["name"] for f in sch.get("queryType",{}).get("fields",[])]
+                fin_q = {f["name"]:[a["name"] for a in f.get("args",[])]
+                         for f in sch.get("queryType",{}).get("fields",[])
+                         if any(x in f["name"].lower() for x in ["cobran","fatura","financ"])}
+                cob_t = {t["name"]:[f["name"] for f in t.get("fields",[])]
+                         for t in sch.get("types",[])
+                         if any(x in t["name"].lower() for x in ["cobran","fatura"])
+                         and not t["name"].startswith("_") and t.get("fields")}
+                resultado["graphql"] = {"ok":True,"all_queries":all_q,
+                                        "fin_queries":fin_q,"types":cob_t}
+            else:
+                resultado["graphql"] = {"ok":False,"resp":str(rg.json())[:200]}
+        else:
+            resultado["graphql"] = {"ok":False,"status":rg.status_code}
+    except Exception as ge:
+        resultado["graphql"] = {"ok":False,"erro":str(ge)}
+    return resultado
+
+
 with tab_hub:
     st.markdown("### 🔗 Integração Hubsoft — Dados ao Vivo")
 
@@ -2594,12 +2680,19 @@ with tab_hub:
             st.markdown("#### 🔍 Diagnóstico Completo de Conexão")
             with st.spinner("Testando todos os endpoints..."):
                 try:
-                    from hubsoft_api import diagnosticar
-                    diag = diagnosticar(hub_url, hub_cid, hub_csec,
-                                        hub_user, hub_pass, hub_mes)
+                    import importlib, hubsoft_api as _hub_mod
+                    importlib.reload(_hub_mod)
+                    if hasattr(_hub_mod, "diagnosticar"):
+                        diag = _hub_mod.diagnosticar(hub_url, hub_cid, hub_csec,
+                                                      hub_user, hub_pass, hub_mes)
+                    else:
+                        # Fallback: diagnóstico embutido
+                        diag = _diagnostico_embutido(
+                            hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes)
                 except Exception as de:
-                    st.error(f"Erro no diagnóstico: {de}")
-                    diag = {}
+                    st.warning(f"Módulo antigo — usando diagnóstico embutido: {de!s:.80}")
+                    diag = _diagnostico_embutido(
+                        hub_url, hub_cid, hub_csec, hub_user, hub_pass, hub_mes)
 
             # Auth
             auth = diag.get("auth",{})
