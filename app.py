@@ -2627,17 +2627,27 @@ with tab_hub:
                     "/api/v1/integracao/financeiro",
                     "/api/v1/integracao/cobranca",
                     "/api/v1/integracao/cliente/financeiro",
+                    "/api/v1/integracao/cliente/financeiro/cobranca",
+                    "/api/v1/integracao/cliente/todos",
                     "/api/v1/integracao/cliente",
                     "/api/v1/integracao",
                 ]
+                # Variações de parâmetros de data (docs v1.99)
+                param_variants = [
+                    ({"pagina":0,"itens_por_pagina":1,
+                      "data_vencimento_ini":"2026-05-01",
+                      "data_vencimento_fim":"2026-05-31"}, "venc"),
+                    ({"pagina":0,"itens_por_pagina":1,
+                      "data_inicio":"2026-05-01",
+                      "data_fim":"2026-05-31"}, "inicio/fim"),
+                    ({"pagina":0,"itens_por_pagina":1,
+                      "de":"2026-05-01",
+                      "ate":"2026-05-31"}, "de/ate"),
+                    ({"pagina":0,"itens_por_pagina":1}, "s/data"),
+                ]
                 rows_ep = []
                 for ep in eps_testar:
-                    for params_t, plabel in [
-                        ({"pagina":0,"itens_por_pagina":1,
-                          "data_vencimento_ini":"2026-05-01",
-                          "data_vencimento_fim":"2026-05-31"}, "c/data"),
-                        ({"pagina":0,"itens_por_pagina":1}, "s/data"),
-                    ]:
+                    for params_t, plabel in param_variants:
                         try:
                             r2 = s2.get(f"{hub_url}{ep}", params=params_t, timeout=10)
                             total = ""; chaves = ""
