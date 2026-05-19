@@ -451,50 +451,101 @@ class HubsoftAPI:
         r.raise_for_status()
         return r.json()
 
+    def get_schema_graphql(self) -> dict:
+        """Introspecção do schema GraphQL para descobrir queries e campos."""
+        query = """
+        {
+          __schema {
+            queryType { fields { name args { name } } }
+            types {
+              name
+              fields { name }
+            }
+          }
+        }
+        """
+        return self._graphql(query)
+
     def get_cobrancas_graphql(self, data_ini: str, data_fim: str,
                               page: int = 1, per_page: int = 100) -> dict:
         """
-        Busca cobranças via GraphQL — retorna TODAS incluindo PIX/débito.
-        data_ini/data_fim: 'YYYY-MM-DD'
+        Busca cobranças via GraphQL — tenta múltiplas variações de parâmetros.
         """
-        query = """
-        query Cobrancas($page: Int, $first: Int, $de: String, $ate: String) {
-            cobrancas(page: $page, first: $first,
-                      de: $de, ate: $ate) {
-                paginatorInfo {
-                    currentPage
-                    lastPage
-                    total
-                }
-                data {
-                    id_cobranca
-                    id_cliente
-                    nome_razaosocial
-                    valor
-                    valor_pago
-                    recebido
-                    data_vencimento
-                    data_pagamento
-                    status
-                    descricao
-                    forma_pagamento
-                }
-            }
-        }
-        """
-        variables = {
-            "page": page,
-            "first": per_page,
-            "de": data_ini,
-            "ate": data_fim,
-        }
-        return self._graphql(query, variables)
+        # Variações de query para descobrir quais campos existem
+        # Baseado nos erros: "de"/"ate" inválidos, "nome_razaosocial" inválido
+        queries_tentar = [
+            # Tentativa 1: data_vencimento_ini / data_vencimento_fim
+            ("""query($p:Int,$f:Int,$di:String,$df:String){
+                cobrancas(page:$p,first:$f,
+                    data_vencimento_ini:$di,data_vencimento_fim:$df){
+                    paginatorInfo{currentPage lastPage total}
+                    data{id nome valor data_vencimento data_pagamento status}
+                }}""",
+             {"p":page,"f":per_page,"di":data_ini,"df":data_fim}),
+            # Tentativa 2: sem filtro de data, só paginação
+            ("""query($p:Int,$f:Int){
+                cobrancas(page:$p,first:$f){
+                    paginatorInfo{currentPage lastPage total}
+                    data{id nome valor data_vencimento status}
+                }}""",
+             {"p":page,"f":per_page}),
+            # Tentativa 3: campos mínimos para descobrir schema
+            ("""{ cobrancas(page:1,first:1){
+                paginatorInfo{total}
+                data{id}
+            }}""", None),
+        ]
+
+        last_err = None
+        for q, v in queries_tentar:
+            try:
+                resp = self._graphql(q, v)
+                errors = resp.get("errors", [])
+                if not errors and resp.get("data"):
+                    return resp
+                # Se retornou erros, usa para diagnóstico
+                if errors:
+                    last_err = errors
+                    # Log os erros para ajudar a corrigir a query
+                    for e in errors[:3]:
+                        print(f"  GQL erro: {e.get('message','')[:100]}")
+            except Exception as ex:
+                last_err = str(ex)
+
+        # Retorna o último erro para diagnóstico
+        return {"errors": last_err, "data": None}
 
     def get_cobrancas_graphql_all(self, data_ini: str, data_fim: str,
                                    per_page: int = 100) -> pd.DataFrame:
         """
-        Busca TODAS as cobranças do período via GraphQL (com paginação automática).
+        Busca TODAS as cobranças do período via GraphQL.
+        Descobre automaticamente os campos disponíveis.
         """
+        # Primeiro descobre o schema
+        try:
+            schema = self.get_schema_graphql()
+            if schema.get("data"):
+                # Encontra campos do tipo Cobranca
+                types = schema["data"]["__schema"]["types"]
+                cob_type = next((t for t in types
+                                 if t["name"] in ("Cobranca","Cobrança","Financeiro")), None)
+                if cob_type and cob_type.get("fields"):
+                    fields = [f["name"] for f in cob_type["fields"]]
+                    print(f"  GQL campos Cobranca: {fields[:15]}")
+                    # Salva para uso na query
+                    self._gql_cob_fields = fields
+
+                # Encontra args do query cobrancas
+                qtypes = schema["data"]["__schema"]["queryType"]["fields"]
+                cob_q = next((q for q in qtypes
+                              if "cobran" in q["name"].lower()), None)
+                if cob_q:
+                    args = [a["name"] for a in cob_q.get("args", [])]
+                    print(f"  GQL cobrancas args: {args}")
+                    self._gql_cob_args = args
+        except Exception as schema_err:
+            print(f"  GQL schema erro: {schema_err}")
+
         all_data = []
         page = 1
         last_page = 1
@@ -502,23 +553,34 @@ class HubsoftAPI:
         while page <= last_page:
             try:
                 resp = self.get_cobrancas_graphql(data_ini, data_fim, page, per_page)
+                if resp.get("errors"):
+                    print(f"  GQL erros: {resp['errors'][:2]}")
+                    break
+
                 result = resp.get("data", {}).get("cobrancas", {})
+                if not result:
+                    # Tenta outras chaves
+                    data_keys = list(resp.get("data", {}).keys())
+                    print(f"  GQL data keys: {data_keys}")
+                    if data_keys:
+                        result = resp["data"][data_keys[0]]
+
                 pag_info = result.get("paginatorInfo", {})
                 data = result.get("data", [])
 
                 if page == 1:
                     last_page = pag_info.get("lastPage", 1)
                     total = pag_info.get("total", "?")
-                    print(f"  GraphQL cobranças: total={total} páginas={last_page}")
+                    print(f"  GQL: total={total} páginas={last_page}")
 
                 all_data.extend(data)
                 page += 1
 
             except Exception as e:
-                print(f"  GraphQL erro p.{page}: {e}")
+                print(f"  GQL erro p.{page}: {e}")
                 break
 
-        print(f"  GraphQL carregou: {len(all_data)} cobranças")
+        print(f"  GQL carregou: {len(all_data)} registros")
         if not all_data:
             return pd.DataFrame()
         return self._norm_cobrancas(pd.json_normalize(all_data))
