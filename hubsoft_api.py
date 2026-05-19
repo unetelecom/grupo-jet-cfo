@@ -471,49 +471,50 @@ class HubsoftAPI:
         """
         Busca cobranças via GraphQL — tenta múltiplas variações de parâmetros.
         """
-        # Variações de query para descobrir quais campos existem
-        # Baseado nos erros: "de"/"ate" inválidos, "nome_razaosocial" inválido
-        queries_tentar = [
-            # Tentativa 1: data_vencimento_ini / data_vencimento_fim
-            ("""query($p:Int,$f:Int,$di:String,$df:String){
-                cobrancas(page:$p,first:$f,
-                    data_vencimento_ini:$di,data_vencimento_fim:$df){
-                    paginatorInfo{currentPage lastPage total}
-                    data{id nome valor data_vencimento data_pagamento status}
-                }}""",
-             {"p":page,"f":per_page,"di":data_ini,"df":data_fim}),
-            # Tentativa 2: sem filtro de data, só paginação
-            ("""query($p:Int,$f:Int){
+        # Query GraphQL mínima — confirmada funcionar via diagnóstico
+        # cobrancas aceita: page, first (sem de/ate)
+        # Campos: id, valor, valor_pago, recebido, data_vencimento,
+        #         data_pagamento, status, descricao (sem nome_razaosocial)
+        query = """query($p:Int,$f:Int){
+            cobrancas(page:$p, first:$f){
+                paginatorInfo{ currentPage lastPage total }
+                data{
+                    id
+                    id_cliente
+                    valor
+                    valor_pago
+                    recebido
+                    data_vencimento
+                    data_pagamento
+                    status
+                    descricao
+                }
+            }
+        }"""
+        resp = self._graphql(query, {"p": page, "f": per_page})
+
+        # Se der erro de campo, tenta versão ultra-mínima
+        if resp.get("errors"):
+            erros = [e.get("message","") for e in resp["errors"]]
+            print(f"  GQL erros: {erros[:3]}")
+            # Remove campos com erro e tenta de novo
+            campos_erro = []
+            for e in erros:
+                import re as _re
+                m = _re.search(r'Cannot query field "(\w+)"', e)
+                if m: campos_erro.append(m.group(1))
+            print(f"  Removendo campos: {campos_erro}")
+
+            # Query mínima garantida
+            query_min = """query($p:Int,$f:Int){
                 cobrancas(page:$p,first:$f){
                     paginatorInfo{currentPage lastPage total}
-                    data{id nome valor data_vencimento status}
-                }}""",
-             {"p":page,"f":per_page}),
-            # Tentativa 3: campos mínimos para descobrir schema
-            ("""{ cobrancas(page:1,first:1){
-                paginatorInfo{total}
-                data{id}
-            }}""", None),
-        ]
+                    data{id valor data_vencimento status}
+                }
+            }"""
+            resp = self._graphql(query_min, {"p": page, "f": per_page})
 
-        last_err = None
-        for q, v in queries_tentar:
-            try:
-                resp = self._graphql(q, v)
-                errors = resp.get("errors", [])
-                if not errors and resp.get("data"):
-                    return resp
-                # Se retornou erros, usa para diagnóstico
-                if errors:
-                    last_err = errors
-                    # Log os erros para ajudar a corrigir a query
-                    for e in errors[:3]:
-                        print(f"  GQL erro: {e.get('message','')[:100]}")
-            except Exception as ex:
-                last_err = str(ex)
-
-        # Retorna o último erro para diagnóstico
-        return {"errors": last_err, "data": None}
+        return resp
 
     def get_cobrancas_graphql_all(self, data_ini: str, data_fim: str,
                                    per_page: int = 100) -> pd.DataFrame:
@@ -554,36 +555,52 @@ class HubsoftAPI:
             try:
                 resp = self.get_cobrancas_graphql(data_ini, data_fim, page, per_page)
                 if resp.get("errors"):
-                    print(f"  GQL erros: {resp['errors'][:2]}")
+                    erros = resp["errors"]
+                    print(f"  GQL p.{page} erros: {str(erros)[:120]}")
                     break
 
                 result = resp.get("data", {}).get("cobrancas", {})
                 if not result:
-                    # Tenta outras chaves
                     data_keys = list(resp.get("data", {}).keys())
                     print(f"  GQL data keys: {data_keys}")
                     if data_keys:
                         result = resp["data"][data_keys[0]]
 
                 pag_info = result.get("paginatorInfo", {})
-                data = result.get("data", [])
+                data_raw = result.get("data", [])
 
                 if page == 1:
                     last_page = pag_info.get("lastPage", 1)
-                    total = pag_info.get("total", "?")
+                    total    = pag_info.get("total", "?")
                     print(f"  GQL: total={total} páginas={last_page}")
+                    if data_raw:
+                        print(f"  GQL campos: {list(data_raw[0].keys())}")
 
-                all_data.extend(data)
+                all_data.extend(data_raw)
                 page += 1
 
             except Exception as e:
                 print(f"  GQL erro p.{page}: {e}")
                 break
 
-        print(f"  GQL carregou: {len(all_data)} registros")
+        print(f"  GQL carregou: {len(all_data)} registros (sem filtro de data)")
+
         if not all_data:
             return pd.DataFrame()
-        return self._norm_cobrancas(pd.json_normalize(all_data))
+
+        df = self._norm_cobrancas(pd.json_normalize(all_data))
+
+        # Filtra por período client-side (já que GQL não aceita filtro de data)
+        if not df.empty and "data_vencimento" in df.columns and data_ini and data_fim:
+            mask = (
+                (df["data_vencimento"] >= pd.Timestamp(data_ini)) &
+                (df["data_vencimento"] <= pd.Timestamp(data_fim))
+            )
+            df_filtrado = df[mask].copy()
+            print(f"  GQL filtrado por {data_ini}→{data_fim}: {len(df_filtrado)} registros")
+            return df_filtrado
+
+        return df
 
     def cruzamento_clientes(self, cob_df=None, mes=None):
         if cob_df is None or (hasattr(cob_df,"empty") and cob_df.empty):
