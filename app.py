@@ -1632,9 +1632,10 @@ with st.spinner("🧠 Calculando agendamento inteligente..."):
         usar_recebidos=True,
     )
 
-tab_intel, tab_agenda, tab_crz, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_hub, tab_maxwell = st.tabs([
+tab_intel, tab_agenda, tab_hub, tab_crz, tab_recebidos, tab_categ, tab_lista, tab_nc, tab_maxwell = st.tabs([
     "🧠 Inteligência Financeira",
     "📅 Agenda Detalhada",
+    "🔗 Hubsoft",
     "📊 Cruzamento Clientes",
     f"✅ Já Recebidos ({_n_rec}) — {brl(_v_rec)}",
     "📂 Por Categoria",
