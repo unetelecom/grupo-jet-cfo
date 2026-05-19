@@ -2589,143 +2589,57 @@ with tab_hub:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-        # DIAGNÓSTICO: testa cada endpoint
+        # DIAGNÓSTICO COMPLETO
         if btn_diag and cred_ok:
-            st.markdown("#### 🔍 Diagnóstico de Conexão")
-            import requests as _req
-
-            # Autenticação
-            token_achado = None
-            paths = ["/oauth/token","/api/oauth/token","/oauth/access-token","/api/v1/oauth/token"]
-            body  = {"grant_type":"password","client_id":hub_cid,"client_secret":hub_csec,
-                     "username":hub_user,"password":hub_pass}
-            for path in paths:
+            st.markdown("#### 🔍 Diagnóstico Completo de Conexão")
+            with st.spinner("Testando todos os endpoints..."):
                 try:
-                    r = _req.post(f"{hub_url}{path}", data=body,
-                                  headers={"Content-Type":"application/x-www-form-urlencoded",
-                                           "Accept":"application/json"}, timeout=15)
-                    if r.status_code == 200 and "access_token" in r.text:
-                        token_achado = r.json().get("access_token","")
-                        st.success(f"✅ Autenticado via `{path}`")
-                        break
-                except: pass
+                    from hubsoft_api import diagnosticar
+                    diag = diagnosticar(hub_url, hub_cid, hub_csec,
+                                        hub_user, hub_pass, hub_mes)
+                except Exception as de:
+                    st.error(f"Erro no diagnóstico: {de}")
+                    diag = {}
 
-            if not token_achado:
-                st.error("❌ Falha na autenticação")
+            # Auth
+            auth = diag.get("auth",{})
+            if auth.get("ok"):
+                st.success(f"✅ Autenticado via `{auth.get('path')}` — base: `{auth.get('base')}`")
             else:
-                st.markdown("**Testando todos os endpoints financeiros:**")
-                s2 = _req.Session()
-                s2.headers.update({"Authorization":f"Bearer {token_achado}","Accept":"application/json"})
-                eps_testar = [
-                    "/api/v1/integracao/financeiro/fatura",
-                    "/api/v1/integracao/financeiro/cobranca",
-                    "/api/v1/integracao/financeiro/cobrancas",
-                    "/api/v1/integracao/financeiro/conta_receber",
-                    "/api/v1/integracao/financeiro/contas_receber",
-                    "/api/v1/integracao/financeiro/receber",
-                    "/api/v1/integracao/financeiro/movimento",
-                    "/api/v1/integracao/financeiro",
-                    "/api/v1/integracao/cobranca",
-                    "/api/v1/integracao/cliente/financeiro",
-                    "/api/v1/integracao/cliente/financeiro/cobranca",
-                    "/api/v1/integracao/cliente/todos",
-                    "/api/v1/integracao/cliente",
-                    "/api/v1/integracao",
-                ]
-                # Variações de parâmetros de data (docs v1.99)
-                param_variants = [
-                    ({"pagina":0,"itens_por_pagina":1,
-                      "data_vencimento_ini":"2026-05-01",
-                      "data_vencimento_fim":"2026-05-31"}, "venc"),
-                    ({"pagina":0,"itens_por_pagina":1,
-                      "data_inicio":"2026-05-01",
-                      "data_fim":"2026-05-31"}, "inicio/fim"),
-                    ({"pagina":0,"itens_por_pagina":1,
-                      "de":"2026-05-01",
-                      "ate":"2026-05-31"}, "de/ate"),
-                    ({"pagina":0,"itens_por_pagina":1}, "s/data"),
-                ]
-                rows_ep = []
-                for ep in eps_testar:
-                    for params_t, plabel in param_variants:
-                        try:
-                            r2 = s2.get(f"{hub_url}{ep}", params=params_t, timeout=10)
-                            total = ""; chaves = ""
-                            try:
-                                d2 = r2.json()
-                                pag = d2.get("paginacao",{})
-                                total = str(pag.get("total_registros","—"))
-                                chaves = str(list(d2.keys()))[:60]
-                            except: chaves = r2.text[:50]
-                            rows_ep.append({
-                                "Endpoint":ep, "Params":plabel,
-                                "Status":r2.status_code, "Total":total,
-                                "Keys":chaves, "OK":r2.status_code==200,
-                            })
-                            if r2.status_code == 200: break
-                        except Exception as ex:
-                            rows_ep.append({
-                                "Endpoint":ep,"Params":plabel,"Status":"Err",
-                                "Total":"","Keys":str(ex)[:50],"OK":False})
-                            break
+                st.error(f"❌ Falha: {auth.get('erro','')}")
+
+            # REST
+            rest = diag.get("rest",[])
+            if rest:
                 import pandas as _pd2
-                st.dataframe(_pd2.DataFrame(rows_ep), use_container_width=True,
-                             hide_index=True, height=500)
-                ok_eps = [r for r in rows_ep if r["OK"]]
-                if ok_eps:
-                    st.success(f"✅ {len(ok_eps)} endpoints REST disponíveis:")
-                    for r in ok_eps:
-                        st.code(f"{r['Endpoint']}  →  total_registros={r['Total']}")
+                df_rest = _pd2.DataFrame(rest)
+                st.markdown("**Endpoints REST:**")
+                st.dataframe(df_rest, use_container_width=True, hide_index=True, height=450)
+                ok_rest = [r for r in rest if r["OK"]]
+                if ok_rest:
+                    st.success(f"✅ {len(ok_rest)} endpoints disponíveis:")
+                    for r in ok_rest:
+                        st.code(f"{r['Endpoint']}  →  total={r['Total']}")
+
+            # GraphQL
+            gql = diag.get("graphql",{})
+            st.markdown("**API GraphQL:**")
+            if gql.get("ok"):
+                st.success("✅ GraphQL disponível!")
+                fin_q = gql.get("fin_queries",{})
+                if fin_q:
+                    st.markdown("**Queries financeiras e argumentos:**")
+                    for qname, qargs in fin_q.items():
+                        st.code(f"{qname}({', '.join(qargs)})")
                 else:
-                    st.error("❌ Nenhum endpoint REST financeiro retornou dados")
-
-                # Testa GraphQL com introspecção
-                st.markdown("**Testando API GraphQL (`/graphql/v1`):**")
-                gql_url = f"{hub_url}/graphql/v1"
-
-                # Introspecção completa
-                intro_q = """{__schema{
-                  queryType{fields{name args{name}}}
-                  types{name fields{name}}
-                }}"""
-                try:
-                    ri = s2.post(gql_url, json={"query": intro_q}, timeout=20)
-                    if ri.status_code != 200:
-                        st.error(f"GraphQL: HTTP {ri.status_code}")
-                    else:
-                        sch = ri.json().get("data",{}).get("__schema",{})
-                        if not sch:
-                            st.warning(f"GraphQL sem schema: {ri.json()}")
-                        else:
-                            st.success("✅ GraphQL disponível! Analisando schema...")
-
-                            # Todas as queries
-                            all_q = [f["name"] for f in sch.get("queryType",{}).get("fields",[])]
-                            st.markdown("**Todas as queries disponíveis:**")
-                            st.code(str(sorted(all_q)))
-
-                            # Args das queries financeiras
-                            fin_queries = {}
-                            for f in sch.get("queryType",{}).get("fields",[]):
-                                nm = f["name"].lower()
-                                if any(x in nm for x in ["cobran","financ","fatura","receber","pagamento"]):
-                                    args = [a["name"] for a in f.get("args",[])]
-                                    fin_queries[f["name"]] = args
-
-                            if fin_queries:
-                                st.markdown("**Queries financeiras e seus parâmetros:**")
-                                for qn, qa in fin_queries.items():
-                                    st.code(f"{qn}({', '.join(qa)})")
-
-                            # Campos dos tipos financeiros
-                            for t in sch.get("types",[]):
-                                if any(x in t["name"].lower() for x in ["cobran","fatura","financ"])                                    and not t["name"].startswith("_") and t.get("fields"):
-                                    fields = [f["name"] for f in t["fields"]]
-                                    st.markdown(f"**Tipo `{t['name']}` — campos:**")
-                                    st.code(str(fields))
-
-                except Exception as gql_e:
-                    st.error(f"GraphQL erro: {gql_e}")
+                    st.markdown("**Todas as queries:**")
+                    st.code(str(gql.get("all_queries",[])))
+                types = gql.get("types",{})
+                for tname, tfields in types.items():
+                    st.markdown(f"**Tipo `{tname}` — campos:**")
+                    st.code(str(tfields))
+            else:
+                st.warning(f"GraphQL: {gql.get('erro') or gql.get('resp') or gql.get('status','indisponível')}")
 
 
         if not cred_ok:
