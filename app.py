@@ -1298,61 +1298,107 @@ if not pag_df.empty:
 # TELA INICIAL — sem dados
 # ══════════════════════════════════════════════════════════════════════
 if pag_df.empty:
-    st.markdown("""
-    <div style='text-align:center;padding:60px 20px'>
-        <div style='font-size:64px'>📅</div>
-        <h1 style='color:#F05A22;margin:16px 0 8px'>Agenda de Caixa</h1>
-        <p style='color:#888;font-size:15px;max-width:500px;margin:0 auto'>
-            Distribui pagamentos dia a dia conforme as entradas previstas.<br>
-            Mostra o que pagar, o que não cabe e o saldo a cada dia.
-        </p>
-        <div style='margin-top:40px;display:flex;gap:24px;justify-content:center;flex-wrap:wrap'>
-    """, unsafe_allow_html=True)
+    # Mostra aba Hubsoft mesmo sem planilha de contas a pagar
+    _tab_boas_vindas, _tab_hub_init = st.tabs(["🏠 Início", "🔗 Hubsoft"])
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
+    with _tab_boas_vindas:
         st.markdown("""
-        <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
-            <div style='font-size:28px'>💸</div>
-            <div style='font-weight:700;margin:8px 0 4px'>Contas a Pagar</div>
-            <div style='font-size:11px;color:#888'>Importe sua planilha com fornecedores, categorias, vencimentos e valores</div>
-        </div>""", unsafe_allow_html=True)
-    with col2:
-        st.markdown("""
-        <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
-            <div style='font-size:28px'>📥</div>
-            <div style='font-weight:700;margin:8px 0 4px'>Faturamento</div>
-            <div style='font-size:11px;color:#888'>Planilha Hubsoft com cobranças a receber do mês</div>
-        </div>""", unsafe_allow_html=True)
-    with col3:
-        st.markdown("""
-        <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
-            <div style='font-size:28px'>🧮</div>
-            <div style='font-weight:700;margin:8px 0 4px'>Algoritmo</div>
-            <div style='font-size:11px;color:#888'>Distribui pagamentos por prioridade: 🔴 Crítico → 🟠 Alta → 🟡 Média → 🟢 Baixa</div>
-        </div>""", unsafe_allow_html=True)
-    with col4:
-        st.markdown("""
-        <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
-            <div style='font-size:28px'>🤖</div>
-            <div style='font-weight:700;margin:8px 0 4px'>Maxwell CFO</div>
-            <div style='font-size:11px;color:#888'>IA analisa o fluxo e recomenda ações prioritárias</div>
-        </div>""", unsafe_allow_html=True)
+        <div style='text-align:center;padding:60px 20px'>
+            <div style='font-size:64px'>📅</div>
+            <h1 style='color:#F05A22;margin:16px 0 8px'>Agenda de Caixa</h1>
+            <p style='color:#888;font-size:15px;max-width:500px;margin:0 auto'>
+                Distribui pagamentos dia a dia conforme as entradas previstas.<br>
+                Mostra o que pagar, o que não cabe e o saldo a cada dia.
+            </p>
+            <div style='margin-top:40px;display:flex;gap:24px;justify-content:center;flex-wrap:wrap'>
+        """, unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    # Mostra erro Hubsoft na tela inicial se existir
-    if st.session_state.get("hub_erro"):
-        with st.expander("🔗 Erro Hubsoft — clique para ver detalhes", expanded=True):
-            st.error("❌ Falha na conexão com o Hubsoft:")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown("""
+            <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
+                <div style='font-size:28px'>💸</div>
+                <div style='font-weight:700;margin:8px 0 4px'>Contas a Pagar</div>
+                <div style='font-size:11px;color:#888'>Importe sua planilha com fornecedores, categorias, vencimentos e valores</div>
+            </div>""", unsafe_allow_html=True)
+        with col2:
+            st.markdown("""
+            <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
+                <div style='font-size:28px'>📥</div>
+                <div style='font-weight:700;margin:8px 0 4px'>Faturamento</div>
+                <div style='font-size:11px;color:#888'>Planilha Hubsoft com cobranças a receber do mês</div>
+            </div>""", unsafe_allow_html=True)
+        with col3:
+            st.markdown("""
+            <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
+                <div style='font-size:28px'>🧮</div>
+                <div style='font-weight:700;margin:8px 0 4px'>Algoritmo</div>
+                <div style='font-size:11px;color:#888'>Distribui pagamentos por prioridade: 🔴 Crítico → 🟠 Alta → 🟡 Média → 🟢 Baixa</div>
+            </div>""", unsafe_allow_html=True)
+        with col4:
+            st.markdown("""
+            <div style='background:#1A1A1A;border-radius:12px;padding:20px;text-align:center'>
+                <div style='font-size:28px'>🤖</div>
+                <div style='font-weight:700;margin:8px 0 4px'>Maxwell CFO</div>
+                <div style='font-size:11px;color:#888'>IA analisa o fluxo e recomenda ações prioritárias</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        # Mostra erro Hubsoft na tela inicial se existir
+        if st.session_state.get("hub_erro"):
+            with st.expander("🔗 Erro Hubsoft — clique para ver detalhes", expanded=True):
+                st.error("❌ Falha na conexão com o Hubsoft:")
+                st.code(st.session_state["hub_erro"], language="text")
+                st.markdown("""
+    **Como resolver:**
+    1. Vá em **Manage app → Logs** para ver o erro completo
+    2. Verifique os **Secrets** — a URL deve ser `https://api.jettelecom.hubsoft.com.br`
+    3. A senha pode ter sido alterada após o vazamento no GitHub
+                """)
+        else:
+            st.info("👈 **Comece importando a planilha de Contas a Pagar** na barra lateral.")
+    with _tab_hub_init:
+        st.markdown("### 🔗 Hubsoft — Diagnóstico e Dados ao Vivo")
+        if not _HAS_HUB:
+            st.error("hubsoft_api.py não encontrado no repositório.")
+        elif st.session_state.get("hub_erro"):
+            st.error("❌ Erro na conexão:")
             st.code(st.session_state["hub_erro"], language="text")
             st.markdown("""
 **Como resolver:**
-1. Vá em **Manage app → Logs** para ver o erro completo
-2. Verifique os **Secrets** — a URL deve ser `https://api.jettelecom.hubsoft.com.br`
-3. A senha pode ter sido alterada após o vazamento no GitHub
+1. **Manage app → Logs** para ver o erro completo
+2. URL nos Secrets: `https://api.jettelecom.hubsoft.com.br`
+3. Credenciais no Streamlit Cloud → Settings → Secrets
             """)
-    else:
-        st.info("👈 **Comece importando a planilha de Contas a Pagar** na barra lateral.")
+        elif _hub_auto_ok:
+            st.success(f"✅ Hubsoft conectado — {_hub_totais.get('atualizado_em','?')}")
+            totais_h = _hub_totais
+            hc1,hc2,hc3,hc4 = st.columns(4)
+            hc1.metric("📋 Faturado",   brl(totais_h.get("faturado",0)),   f"{totais_h.get('n_cobrancas',0)} cobranças")
+            hc2.metric("✅ Recebido",   brl(totais_h.get("recebido",0)),   f"{totais_h.get('adimplencia',0)}% adimpl.")
+            hc3.metric("🔴 Atrasado",   brl(totais_h.get("atrasado",0)),   f"{totais_h.get('n_atrasadas',0)} cobranças", delta_color="inverse")
+            hc4.metric("🔵 A Vencer",   brl(totais_h.get("a_vencer",0)),   f"{totais_h.get('n_a_vencer',0)} cobranças")
+            st.info("👈 Para ver o diagnóstico completo, importe a **Contas a Pagar** e acesse a aba 🔗 Hubsoft completa.")
+        else:
+            _gs2 = lambda k,d="": (st.secrets.get(k,d) if hasattr(st,"secrets") else d)
+            hub_url2   = _gs2("HUBSOFT_URL","https://api.jettelecom.hubsoft.com.br")
+            hub_cid2   = _gs2("HUBSOFT_CLIENT_ID","")
+            hub_csec2  = _gs2("HUBSOFT_CLIENT_SECRET","")
+            hub_user2  = _gs2("HUBSOFT_USERNAME","")
+            hub_pass2  = _gs2("HUBSOFT_PASSWORD","")
+            if all([hub_cid2, hub_csec2, hub_user2, hub_pass2]):
+                if st.button("🔄 Tentar conectar ao Hubsoft", key="btn_hub_init"):
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.warning("Configure as credenciais nos **Secrets** do Streamlit Cloud.")
+                st.code("""HUBSOFT_URL           = "https://api.jettelecom.hubsoft.com.br"
+HUBSOFT_CLIENT_ID     = "147"
+HUBSOFT_CLIENT_SECRET = "seu_secret"
+HUBSOFT_USERNAME      = "ruan.lobo@grupojet.com.br"
+HUBSOFT_PASSWORD      = "sua_senha"
+ANTHROPIC_API_KEY     = "sk-ant-..."
+""", language="toml")
     st.stop()
 
 # ══════════════════════════════════════════════════════════════════════
